@@ -1,11 +1,16 @@
 import asyncio
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import requests
 from fastapi.middleware.cors import CORSMiddleware
 from netconf_ops import DeviceClient
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 NETBOX_URL = "http://localhost:8000"  # Prípadne uprav podľa reálnej adresy
 
