@@ -9,6 +9,7 @@ from ncclient.xml_ import to_ele
 from ncclient import manager
 from netmiko import ConnectHandler
 from jinja2 import Environment, FileSystemLoader
+from pydantic import BaseModel
 
 MACVENDORS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImp0aSI6IjNiYTdlMGJiLWVmNTAtNGZlZi1iNGMzLTgzOTM3MzMxZDAwYyJ9.eyJpc3MiOiJtYWN2ZW5kb3JzIiwiYXVkIjoibWFjdmVuZG9ycyIsImp0aSI6IjNiYTdlMGJiLWVmNTAtNGZlZi1iNGMzLTgzOTM3MzMxZDAwYyIsImlhdCI6MTc0NTE2MDg3NywiZXhwIjoyMDU5NjU2ODc3LCJzdWIiOiIxNTkwMCIsInR5cCI6ImFjY2VzcyJ9.bAQiyVtftjLZM7gdIoFMbEDEj08lc_QK5Kk8CmCCVXhyy-oFN9lAwBx_zdwIC5OW3Lj_DLY-s5Na56oYJMqJvg"
 
@@ -274,3 +275,64 @@ class DeviceClient:
         commands = [line.strip() for line in cli.splitlines() if line.strip()]
         output = conn.send_config_set(commands)
         return output
+
+    def send_command(self, cmd: str) -> str:
+        conn = self._ensure_ssh()
+        return conn.send_command(cmd)
+
+    def send_config_lines(self, lines: list[str]) -> str:
+        conn = self._ensure_ssh()
+        # Netmiko: send_config_set vie zobrať list
+        return conn.send_config_set(lines)
+
+    def get_running_interface_block(self, interface: str) -> list[str]:
+        raw = self.send_command(f"show running-config interface {interface}")
+        lines = []
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if not ln or ln == "!":
+                continue
+            if ln.lower().startswith("interface "):
+                continue
+            if "building configuration" in ln.lower():
+                continue
+            lines.append(ln)
+        return lines
+
+    def get_interface_primary_ip(self, interface: str) -> str | None:
+        """
+        Cisco: vráti primárnu IPv4 v CIDR (napr. 192.168.60.1/24) alebo None.
+        """
+        raw = self.send_command(f"show running-config interface {interface}")
+        ip = None
+        mask = None
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if ln.startswith("ip address "):
+                parts = ln.split()
+                # ip address A.B.C.D M.M.M.M
+                if len(parts) >= 4 and parts[2].count(".") == 3 and parts[3].count(".") == 3:
+                    ip = parts[2]
+                    mask = parts[3]
+                    break
+        if not ip or not mask:
+            return None
+
+        import ipaddress
+        prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        return f"{ip}/{prefix}"
+
+
+
+class PortCompareRequest(BaseModel):
+    device_name: str
+    host: str
+    interface: str
+    username: str | None = None
+    password: str | None = None
+
+
+class PortApplyRequest(PortCompareRequest):
+    # merge = doplní len chýbajúce príkazy (neodstraňuje navyše veci)
+    # replace = “celý port podľa SoT” (odporúčané pri tvojom use-case)
+    strategy: str = "replace"  # "merge" | "replace"
