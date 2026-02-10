@@ -2,7 +2,6 @@ import asyncio
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import requests
