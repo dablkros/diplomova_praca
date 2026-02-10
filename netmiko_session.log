@@ -1,0 +1,14 @@
+
+
+
+uniza-lab-sw-01#
+uniza-lab-sw-01#terminal width 511
+uniza-lab-sw-01#terminal length 0
+uniza-lab-sw-01#
+uniza-lab-sw-01#clear counters interface GigabitEthernet1/0/11
+                                    ^
+% Invalid input detected at '^' marker.
+
+uniza-lab-sw-01#
+uniza-lab-sw-01#
+uniza-lab-sw-01#exit

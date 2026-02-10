@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <title>NETCONF Web Panel</title>
+    <style>
+        body {
+            font-family: Arial;
+            max-width: 600px;
+            margin: auto;
+            padding: 2rem;
+        }
+
+        input, button, select {
+            margin: 0.5rem 0;
+            width: 100%;
+            padding: 0.5rem;
+        }
+
+        #message {
+            margin-top: 1rem;
+            padding: 1rem;
+            border-radius: 5px;
+            display: none;
+        }
+
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .info {
+            background-color: #e2e3e5;
+            color: #383d41;
+            border: 1px solid #d6d8db;
+        }
+
+        .button-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .button-grid button {
+            width: 100%;
+        }
+
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        /* Modal content box */
+        .modal-content {
+            background: #fff;
+            padding: 1rem;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            position: relative;
+        }
+
+        /* „X“ button */
+        .close {
+            position: absolute;
+            top: 0.5rem;
+            right: 1rem;
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        .modal-content {
+            position: relative; /* aby absolútne pozicovanie fungovalo */
+        }
+
+        .stop-button {
+            position: absolute;
+            top: 0.5rem;
+            right: 2.5rem; /* tesne vedľa krížika */
+            background: #f5f5f5;
+            border: 1px solid #ccc;
+            color: #333;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.9rem;
+            border-radius: 4px;
+            cursor: pointer;
+            z-index: 1; /* nech je nad grafom */
+        }
+
+        .stop-button {
+            width: auto;
+            padding: 0.25rem 0.75rem;
+            min-width: 4rem;
+        }
+
+        .stop-button:hover {
+            background: #e0e0e0;
+        }
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+<h2>NETCONF Ovládaci Panel</h2>
+
+<!-- Kaskádový výber region -> subregion -> site -> device -->
+<label for="regionSelect">Vyber región:</label>
+<select id="regionSelect" onchange="onRegionChange()">
+    <option value="">-- Vyber --</option>
+</select>
+
+<label for="subregionSelect">Vyber subregión:</label>
+<select id="subregionSelect" onchange="onSubregionChange()">
+    <option value="">-- Vyber --</option>
+</select>
+
+<label for="siteSelect">Vyber site:</label>
+<select id="siteSelect" onchange="onSiteChange()">
+    <option value="">-- Vyber --</option>
+</select>
+
+<label for="deviceSelect">Vyber zariadenie:</label>
+<select id="deviceSelect" onchange="onDeviceChange()">
+    <option value="">-- Vyber --</option>
+</select>
+
+<!-- Polia pre IP, user, password, interface, ip_address (DHCP) -->
+<input type="text" id="host" placeholder="IP zariadenia (host)">
+<input type="text" id="username" placeholder="Používateľské meno">
+<input type="password" id="password" placeholder="Heslo">
+
+<label for="interfaceSelect">Vyber interface zariadenia:</label>
+<select id="interfaceSelect"></select>
+
+<input type="text" id="ip_address" placeholder="IP adresa pre DHCP (voliteľné)">
+
+<!-- Ovládacie tlačidlá -->
+<div class="button-grid">
+    <button onclick="sendRequest('shutdown')">Vypnúť interface</button>
+    <button onclick="sendRequest('no-shutdown')">Zapnúť interface</button>
+    <button onclick="sendRequest('restart-interface')">Reštartovať interface</button>
+    <button onclick="sendRequest('check_macaddress')">Zobraz Mac‑Adresu</button>
+    <button onclick="sendRequest('clear-counters')">Restovanie counterov</button>
+    <button onclick="sendRequest('show-counters')">Zobraz packet counters</button>
+    <button onclick="sendRequest('show-status-int')">Stav interface</button>
+    <button onclick="sendRequest('show-dhcp-bindings')">Zobraz DHCP bindingy</button>
+    <button onclick="sendRequest('clear-dhcp-binding')">Vymazať DHCP binding</button>
+    <button onclick="sendRequest('configure-interface')">Konfiguruj interface</button>
+    <button id="measureBtn">Štart error graf</button>
+    <canvas id="countersChart" style="max-width:100%; height:300px; display:none;"></canvas>
+    <button onclick="startLiveCounters()">Live counter</button>
+
+
+    <!-- prázdne / budúce akcie -->
+    <button disabled>Akcia 7</button>
+</div>
+<div id="liveCounter" style="display:none; padding:1rem; border:1px solid #ccc; border-radius:5px; margin-top:1rem;">
+    <strong>Live counters:</strong><br>
+    Input packets: <span id="liveInput">0</span><br>
+    Output packets: <span id="liveOutput">0</span><br>
+    <button id="stopLiveBtn" style="margin-top:0.5rem;">■ Stop live</button>
+</div>
+<div id="message"></div>
+<div id="chartModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span id="closeModal" class="close">&times;</span>
+        <button id="stopModalBtn" class="stop-button">
+            ■ Stop
+        </button>
+        <h3>Packet Error Counters(real-time)</h3>
+        <canvas id="modalCountersChart" style="width:100%; height:300px;"></canvas>
+    </div>
+
+    <script>
+        // ------------------------------------------------------------------------
+        //  Pomocné funkcie na zobrazenie hlásenia (úspech / chyba / info)
+        // ------------------------------------------------------------------------
+        function showMessage(text, type) {
+            const box = document.getElementById("message");
+            box.style.display = "block";
+            box.className = "";
+            if (type === "success") {
+                box.classList.add("success");
+            } else if (type === "error") {
+                box.classList.add("error");
+            } else {
+                box.classList.add("info");
+            }
+            box.textContent = text;
+        }
+
+        // ------------------------------------------------------------------------
+        //  Funkcie pre načítanie dát z backendu (fetch)
+        // ------------------------------------------------------------------------
+        async function fetchRegions() {
+            // Vráti všetky regiony z NetBoxu
+            const url = "http://localhost:8001/regions";  // Uprav si port podľa seba
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("Chyba pri získavaní regiónov");
+            }
+            return await resp.json();
+        }
+
+        async function fetchSubregions(regionId) {
+            if (!regionId) return [];
+            const url = `http://localhost:8001/regions/${regionId}/subregions`;
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("Chyba pri získavaní subregiónov");
+            }
+            return await resp.json();
+        }
+
+        async function fetchSitesByRegion(regionId) {
+            // region_id je voliteľný, ak nie je, vráti všetky site-y
+            const url = regionId
+                ? `http://localhost:8001/sites?region_id=${regionId}`
+                : "http://localhost:8001/sites";
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("Chyba pri získavaní site-ov");
+            }
+            return await resp.json();
+        }
+
+        async function fetchDevicesBySite(siteId) {
+            const url = siteId
+                ? `http://localhost:8001/devices/filter?site_id=${siteId}`
+                : "http://localhost:8001/devices/filter";
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("Chyba pri získavaní zariadení");
+            }
+            return await resp.json();
+        }
+
+        async function fetchInterfaces(deviceName) {
+            const url = `http://localhost:8001/interfaces?device_name=${deviceName}`;
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                throw new Error("Chyba pri získavaní interfejsov");
+            }
+            return await resp.json();
+        }
+
+        // ------------------------------------------------------------------------
+        //  Funkcie, ktoré reagujú na zmeny vo výberoch
+        // ------------------------------------------------------------------------
+        async function onRegionChange() {
+            const regionId = document.getElementById("regionSelect").value;
+
+            // Vymazanie subregion, site, devices
+            clearSelect("subregionSelect");
+            clearSelect("siteSelect");
+            clearSelect("deviceSelect");
+            clearSelect("interfaceSelect");
+
+            // Ak nevybral žiadny region, koniec
+            if (!regionId) return;
+
+            try {
+                // Načítaj subregióny pre vybraný region
+                const subregions = await fetchSubregions(regionId);
+                fillSelect("subregionSelect", subregions, "name", "id", true);
+
+                // Môžeš priamo načítať aj site-y, ak ťa nezaujímajú subregióny
+                // a naplniť siteSelect
+                // Avšak, ak potrebujeme subregión, pokračujeme cez onSubregionChange.
+            } catch (e) {
+                showMessage(e.message, "error");
+            }
+        }
+
+        async function onSubregionChange() {
+            const subregionId = document.getElementById("subregionSelect").value;
+
+            // Vymaž siteSelect a deviceSelect
+            clearSelect("siteSelect");
+            clearSelect("deviceSelect");
+            clearSelect("interfaceSelect");
+
+            if (!subregionId) return;
+
+            try {
+                // Ak používaš subregion -> site priamo takto:
+                // Zavoláš fetchSitesByRegion s ID subregiónu
+                // (funguje len, ak NetBox pre subregión používa rovnaké region_id = child).
+                // V reáli treba overiť, či NetBox takto rozlišuje parent region vs child region.
+                // Nižšie je len ukážka, predpokladá, že subregión je opäť "region" v NetBoxe.
+                const sites = await fetchSitesByRegion(subregionId);
+                fillSelect("siteSelect", sites, "name", "id", true);
+
+            } catch (e) {
+                showMessage(e.message, "error");
+            }
+        }
+
+        async function onSiteChange() {
+            const siteId = document.getElementById("siteSelect").value;
+            clearSelect("deviceSelect");
+            clearSelect("interfaceSelect");
+
+            if (!siteId) return;
+
+            try {
+                // Načítaj zariadenia pre vybraný site
+                const devices = await fetchDevicesBySite(siteId);
+                // V devices je napr. { name, ip, site }
+                fillSelect("deviceSelect", devices, "name", "name", true, "ip");
+            } catch (e) {
+                showMessage(e.message, "error");
+            }
+        }
+
+        async function onDeviceChange() {
+            const deviceName = document.getElementById("deviceSelect").value;
+            clearSelect("interfaceSelect");
+
+            const select = document.getElementById("deviceSelect");
+            const selectedOption = select.options[select.selectedIndex];
+            if (selectedOption && selectedOption.dataset.ip) {
+                document.getElementById("host").value = selectedOption.dataset.ip;
+            }
+
+            if (!deviceName) return;
+
+            try {
+                // Načítame rozhrania pre dané zariadenie
+                const ifaces = await fetchInterfaces(deviceName);
+                fillSelect("interfaceSelect", ifaces, "name", "name", true);
+            } catch (e) {
+                showMessage(e.message, "error");
+            }
+        }
+
+        // ------------------------------------------------------------------------
+        //  Pomocné funkcie na plnenie <select>
+        // ------------------------------------------------------------------------
+        function clearSelect(selectId) {
+            const sel = document.getElementById(selectId);
+            sel.innerHTML = `<option value="">-- Vyber --</option>`;
+        }
+
+        /**
+         *
+         * @param {string} selectId - id prvku <select>
+         * @param {Array} data - pole objektov
+         * @param {string} labelKey - kľúč z objektu, ktorý sa zobrazí ako label
+         * @param {string} valueKey - kľúč z objektu, ktorý bude value
+         * @param {boolean} append - či appendovať k existujúcim option (prvý -- Vyber -- ostáva)
+         * @param {string|null} extraKey - ak chceš uložiť do dataset napr. IP
+         */
+        function fillSelect(selectId, data, labelKey, valueKey, append = false, extraKey = null) {
+            const sel = document.getElementById(selectId);
+            if (!append) {
+                clearSelect(selectId);
+            }
+            data.forEach(item => {
+                const opt = document.createElement("option");
+                opt.value = item[valueKey];
+                opt.textContent = item[labelKey];
+                if (extraKey && item[extraKey]) {
+                    opt.dataset.ip = item[extraKey];
+                }
+                sel.appendChild(opt);
+            });
+        }
+
+        // ------------------------------------------------------------------------
+        //  Odoslanie požiadavky na shutdown / no-shutdown / ...
+        // ------------------------------------------------------------------------
+        function sendRequest(action) {
+            const data = {
+                device_name: document.getElementById("deviceSelect").value,
+                host: document.getElementById("host").value,
+                username: document.getElementById("username").value,
+                password: document.getElementById("password").value,
+                interface: document.getElementById("interfaceSelect").value,
+                ip_address: document.getElementById("ip_address").value
+            };
+
+            if (!["clear-dhcp", "clear-dhcp-binding"].includes(action)) {
+                delete data.ip_address;
+            }
+            showMessage("Spracováva sa požiadavka...", "info");
+
+            fetch(`http://localhost:8001/${action}`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(data)
+            })
+                .then(resp => resp.json())
+                .then(json => {
+                    console.log("DEBUG response:", json);
+
+                    if (json.detail) {
+                        showMessage(`Chyba: ${json.detail}`, "error");
+
+                    } else if (action === "check_macaddress" && Array.isArray(json.mac_adresy)) {
+                        if (json.mac_adresy.length) {
+                            const html = json.mac_adresy
+                                .map(e => `${e.mac} – ${e.vendor}`)
+                                .join("<br>");
+                            const box = document.getElementById("message");
+                            box.innerHTML = html;
+                            box.className = "success";
+                            box.style.display = "block";
+                        } else {
+                            showMessage("Žiadne MAC adresy nenájdené.", "info");
+                        }
+
+                    } else if (action === "show-counters" && Array.isArray(json.counters)) {
+                        if (json.counters.length) {
+                            const html = json.counters
+                                .map(e =>
+                                    `Interface ${e.INTERFACE}: ` +
+                                    `Input packets = ${e.INPUT_PACKETS}, ` +
+                                    `Output packets = ${e.OUTPUT_PACKETS}`
+                                )
+                                .join("<br>");
+                            const box = document.getElementById("message");
+                            box.innerHTML = html;
+                            box.className = "success";
+                            box.style.display = "block";
+                        } else {
+                            showMessage("Nenájdené žiadne packet counters.", "info");
+                        }
+                    } else if (action === "show-status-int" && Array.isArray(json.counters)) {
+                        if (json.counters.length) {
+                            const html = json.counters.map(e =>
+                                `Interface ${e.INTERFACE}:<br>` +
+                                `Link: ${e.LINK_STATUS}, Protocol: ${e.PROTOCOL_STATUS}<br>` +
+                                `Duplex: ${e.DUPLEX}, Speed: ${e.SPEED}<br>`
+                            ).join("<hr>");
+                            const box = document.getElementById("message");
+                            box.innerHTML = html;
+                            box.className = "success";
+                            box.style.display = "block";
+                        } else {
+                            showMessage("Nenájdené žiadne údaje o counters.", "info");
+                        }
+                    } else if (action === "show-dhcp-bindings" && Array.isArray(json.bindings)) {
+                        if (json.bindings.length) {
+                            const html = json.bindings
+                                .map(e =>
+                                    `IP: ${e.IP_ADDRESS}, MAC: ${e.HARDWARE_ADDRESS}<br>` +
+                                    `Lease until: ${e.EXPIRATION}, Type: ${e.TYPE}`
+                                )
+                                .join("<hr>");
+                            const box = document.getElementById("message");
+                            box.innerHTML = html;
+                            box.className = "success";
+                            box.style.display = "block";
+                        } else {
+                            showMessage("Žiadne DHCP bindingy nenájdené.", "info");
+                        }
+
+
+                    } else {
+                        // Všetky ostatné akcie (shutdown, no-shutdown, clear-dhcp, restart-interface...)
+                        showMessage(`Úspech: ${json.stav || 'Operácia prebehla úspešne.'}`, "success");
+                    }
+                })
+                .catch(err => {
+                    showMessage(`Chyba pri odosielaní požiadavky: ${err}`, "error");
+                });
+        }
+
+        // ------------------------------------------------------------------------
+        //  Načítanie regiónov pri štarte (init)
+        // ------------------------------------------------------------------------
+        (async function init() {
+            try {
+                showMessage("Načítavam regióny...", "info");
+
+                // Načítaj regióny
+                const regions = await fetchRegions();
+                fillSelect("regionSelect", regions, "name", "id", true);
+
+                // Hotovo - vymažeme info
+                showMessage("", "info");
+                document.getElementById("message").style.display = "none";
+
+            } catch (e) {
+                showMessage(`Nastala chyba pri init: ${e.message}`, "error");
+            }
+        })();
+
+        let ws = null;
+        let modalChart = null;
+
+        function initModalChart() {
+            const ctx = document.getElementById("modalCountersChart").getContext("2d");
+            modalChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: [],
+                    datasets: [
+                        {label: "Input error packets", data: [], fill: false},
+                        {label: "Output error packets", data: [], fill: false}
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: {type: "time", time: {unit: "second"}},
+                        y: {beginAtZero: true}
+                    }
+                }
+            });
+        }
+
+        function openModal() {
+            document.getElementById("chartModal").style.display = "flex";
+            if (!modalChart) initModalChart();
+        }
+
+        function closeModal() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+            document.getElementById("chartModal").style.display = "none";
+            // vymažme body grafu
+            if (modalChart) {
+                modalChart.data.labels.length = 0;
+                modalChart.data.datasets.forEach(ds => ds.data.length = 0);
+                modalChart.update();
+            }
+        }
+
+        // priradíme close tlačidlo
+        document.getElementById("closeModal").addEventListener("click", closeModal);
+        document.getElementById("stopModalBtn").addEventListener("click", () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+                document.getElementById("measureBtn").textContent = "Štart meranie";
+                showMessage("Meranie zastavené. Graf zostáva otvorený.", "info");
+            }
+        });
+
+        document.getElementById("measureBtn").addEventListener("click", () => {
+            const btn = document.getElementById("measureBtn");
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                // Štart merania
+                const host = document.getElementById("host").value;
+                const username = document.getElementById("username").value;
+                const password = document.getElementById("password").value;
+                const iface = document.getElementById("interfaceSelect").value;
+                if (!host || !username || !password || !iface) {
+                    return showMessage("Vyplň všetky polia vrátane interface.", "error");
+                }
+                openModal();
+                btn.textContent = "Stop meranie";
+                showMessage("", "info");
+                // WebSocket setup…
+                const url = `ws://${location.hostname}:8001/ws/counters`
+                    + `?host=${encodeURIComponent(host)}`
+                    + `&username=${encodeURIComponent(username)}`
+                    + `&password=${encodeURIComponent(password)}`
+                    + `&interface=${encodeURIComponent(iface)}`;
+                ws = new WebSocket(url);
+                ws.onmessage = ev => {
+                    const msg = JSON.parse(ev.data);
+                    if (!msg.error) {
+                        const now = new Date();
+                        modalChart.data.labels.push(now);
+                        modalChart.data.datasets[0].data.push(msg.input);
+                        modalChart.data.datasets[1].data.push(msg.output);
+                        modalChart.update();
+                    }
+                };
+                ws.onclose = () => {
+                    btn.textContent = "Štart meranie";
+                    // necháme modal otvorený, user ho môže zatvoriť ručne
+                };
+            } else {
+                // Stop merania priamo zatvorením modalu
+                ws.close();
+                btn.textContent = "Štart meranie";
+            }
+        });
+
+        let liveWs = null;
+
+        function startLiveCounters() {
+            const host = document.getElementById("host").value;
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            const iface = document.getElementById("interfaceSelect").value;
+
+            if (!host || !username || !password || !iface) {
+                return showMessage("Vyplň všetky polia vrátane interface.", "error");
+            }
+
+            // zobraz panel
+            document.getElementById("liveCounter").style.display = "block";
+
+            // otvárame WebSocket na nový endpoint
+            const url = `ws://${location.hostname}:8001/ws/live-counters`
+                + `?host=${encodeURIComponent(host)}`
+                + `&username=${encodeURIComponent(username)}`
+                + `&password=${encodeURIComponent(password)}`
+                + `&interface=${encodeURIComponent(iface)}`;
+
+            liveWs = new WebSocket(url);
+            liveWs.onopen = () => showMessage("Live counter spustený…", "info");
+            liveWs.onmessage = ev => {
+                const msg = JSON.parse(ev.data);
+                if (msg.error) {
+                    showMessage(`Chyba: ${msg.error}`, "error");
+                } else {
+                    document.getElementById("liveInput").innerText = msg.input;
+                    document.getElementById("liveOutput").innerText = msg.output;
+                }
+            };
+            liveWs.onerror = () => showMessage("Chyba Live WS", "error");
+            liveWs.onclose = () => showMessage("Live counter zastavený.", "info");
+        }
+
+        // Priradenie Stop live tlačidla
+        document.getElementById("stopLiveBtn").addEventListener("click", () => {
+            if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+                liveWs.close();
+            }
+            document.getElementById("liveCounter").style.display = "none";
+        });
+    </script>
+</div>
+</body>
+</html>

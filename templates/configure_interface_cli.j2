@@ -1,0 +1,12 @@
+interface {{ interface }}
+ switchport
+{% if description %}
+ description {{ description }}
+{% endif %}
+ switchport mode {{ mode }}
+{% if mode == "access" %}
+ switchport access vlan {{ vlan }}
+{% else %}
+ switchport trunk allowed vlan {{ vlan }}
+{% endif %}
+ no shutdown

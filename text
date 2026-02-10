@@ -1,0 +1,9 @@
+
+services:
+  netbox:
+    ports:
+      - "8000:8080"
+    volumes:
+      - ./secrets/netbox:/opt/netbox/secrets
+      uvicorn main:app --reload --port 8001
+

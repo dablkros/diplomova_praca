@@ -1,0 +1,10 @@
+<config>
+  <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+    <interface>
+      <{{ iface_type }}>
+        <name>{{ iface_name }}</name>
+        <shutdown{% if operation %} operation="{{ operation }}"{% endif %}/>
+      </{{ iface_type }}>
+    </interface>
+  </native>
+</config>

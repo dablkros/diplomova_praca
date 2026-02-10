@@ -1,0 +1,19 @@
+Value IP_ADDRESS (\S+)
+Value HARDWARE_ADDRESS (\S+)
+Value EXPIRATION (\w+\s+\d+\s+\d+\s+\d+:\d+\s+\w+)
+Value TYPE (\S+)
+Value STATE (\S+)
+Value INTERFACE (\S+)
+
+Start
+  ^\s*Bindings from all pools not associated with VRF:\s*$$
+  ^\s*IP\s+address\s+Client-ID/\s+Lease\s+expiration\s+Type\s+State\s+Interface\s*$$ -> DhcpTable
+  ^\s*$$
+  ^. -> Error
+
+DhcpTable
+  ^\s*Hardware\s+address/\s*$$
+  ^\s*User\s+name\s*$$
+  ^\s*${IP_ADDRESS}\s+${HARDWARE_ADDRESS}\s+${EXPIRATION}\s+${TYPE}\s+${STATE}\s+${INTERFACE}\s*$$ -> Record
+  ^\s*$$
+  ^. -> Error
