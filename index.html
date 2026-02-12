@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="sk">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>NETCONF Web Panel</title>
 
     <!-- =======================
@@ -31,9 +31,24 @@
             display: none;
             white-space: pre-wrap;
         }
-        .success { background:#d4edda; color:#155724; border:1px solid #c3e6cb; }
-        .error   { background:#f8d7da; color:#721c24; border:1px solid #f5c6cb; }
-        .info    { background:#e2e3e5; color:#383d41; border:1px solid #d6d8db; }
+
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .info {
+            background: #e2e3e5;
+            color: #383d41;
+            border: 1px solid #d6d8db;
+        }
 
         /* Grid tlačidlá */
         .button-grid {
@@ -42,13 +57,16 @@
             gap: 0.5rem;
             margin-top: 1rem;
         }
-        .button-grid button { width: 100%; }
+
+        .button-grid button {
+            width: 100%;
+        }
 
         /* ============ MODAL ============ */
         .modal {
             position: fixed;
             inset: 0; /* top/left/right/bottom:0 */
-            background: rgba(0,0,0,0.5);
+            background: rgba(0, 0, 0, 0.5);
             display: none;
             align-items: center;
             justify-content: center;
@@ -89,7 +107,10 @@
             width: auto;
             min-width: 4rem;
         }
-        .stop-button:hover { background: #e0e0e0; }
+
+        .stop-button:hover {
+            background: #e0e0e0;
+        }
 
         /* Panel Live counters */
         #liveCounter {
@@ -165,7 +186,9 @@
     <button data-action="shutdown">Vypnúť interface</button>
     <button data-action="no-shutdown">Zapnúť interface</button>
     <button data-action="restart-interface">Reštartovať interface</button>
+    <button disabled>PlaceHolder</button>
     <button data-action="check_macaddress">Zobraz MAC adresu</button>
+    <button id="clearMacBtn">Vymazať MAC tabuľku (dynamic)</button>
 
     <button data-action="clear-counters">Resetovanie counterov</button>
     <button data-action="show-counters">Zobraz packet counters</button>
@@ -241,8 +264,14 @@
      * DOM HELPERY
      ******************************************************************/
     const $ = (id) => document.getElementById(id);
-    function openModal(id) { $(id).style.display = "flex"; }
-    function closeModal(id) { $(id).style.display = "none"; }
+
+    function openModal(id) {
+        $(id).style.display = "flex";
+    }
+
+    function closeModal(id) {
+        $(id).style.display = "none";
+    }
 
 
     function showMessage(text, type = "info") {
@@ -293,7 +322,7 @@
     async function apiPost(path, body) {
         const resp = await fetch(`${API_BASE}${path}`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {"Content-Type": "application/json"},
             body: JSON.stringify(body)
         });
         const json = await resp.json().catch(() => ({}));
@@ -385,6 +414,70 @@
         }
     }
 
+    async function clearMacTableUI() {
+        const deviceSelect = $("deviceSelect");
+        const deviceName = deviceSelect.value;
+
+        // host už vyplňuješ automaticky z deviceSelect.dataset.ip v onDeviceChange
+        const host = $("host").value;
+
+        if (!deviceName || !host) {
+            return showMessage("Vyber zariadenie a skontroluj, či sa vyplnila IP (host).", "error");
+        }
+
+        // Bezpečný default: interface scope (ak je vybraný interface), inak global
+        const iface = $("interfaceSelect").value;
+
+        const payload = {
+            device_name: deviceName,
+            host: host,
+            // username/password posielaj len ak ich chceš override-núť:
+            username: $("username").value || null,
+            password: $("password").value || null,
+            dynamic_only: true
+        };
+
+        // Ak chceš vymazať iba na porte, pošli interface
+        // (ak interface nie je vybraný, spraví global clear)
+        // 1) ak máš VLAN input (ak ešte nemáš, stačí vynechať vlanVal a nechá to iba auto-detekciu z iface)
+        const vlanVal = ($("vlanInput") ? $("vlanInput").value.trim() : "");
+
+// 2) najprv VLAN explicitne
+        if (vlanVal) {
+            payload.vlan = Number(vlanVal);
+        } else if (iface) {
+            // 3) ak niekto vyberie "Vlan 1" z interfaceSelect, premapuj to na VLAN scope
+            const m = iface.match(/^\s*Vlan\s*(\d+)\s*$/i);
+            if (m) {
+                payload.vlan = Number(m[1]);
+            } else {
+                // 4) inak je to normálny port
+                payload.interface = iface;
+            }
+        }
+
+
+        showMessage("Mažem MAC tabuľku…", "info");
+
+        try {
+            const res = await apiPost("/mac-table/clear", payload);
+
+            // pekný výstup
+            const out = [
+                `OK ✅`,
+                `Device: ${res.device}`,
+                `Platform: ${res.platform}`,
+                `Command: ${res.command}`,
+                ``,
+                `${res.output || ""}`
+            ].join("\n");
+
+            showMessage(out, "success");
+        } catch (e) {
+            showMessage(`Chyba: ${e.message}`, "error");
+        }
+    }
+
     async function onDeviceChange() {
         const select = $("deviceSelect");
         const deviceName = select.value;
@@ -411,14 +504,22 @@
      * ZOSTAVENIE PAYLOADU (spoločné pre viac akcií)
      ******************************************************************/
     function buildBasePayload() {
-        return {
+        const u = $("username").value.trim();
+        const p = $("password").value;
+
+        const payload = {
             device_name: $("deviceSelect").value,
             host: $("host").value,
-            username: $("username").value,
-            password: $("password").value,
             interface: $("interfaceSelect").value
         };
+
+        // posielaj creds len ak sú reálne vyplnené
+        if (u) payload.username = u;
+        if (p) payload.password = p;
+
+        return payload;
     }
+
 
     function buildActionPayload(action) {
         const data = buildBasePayload();
@@ -430,20 +531,36 @@
         return data;
     }
 
-    function validateBase(payload) {
-        return payload.device_name && payload.host && payload.username && payload.password && payload.interface;
+    function validateForAction(action, payload) {
+        // vždy musí byť device + host
+        if (!payload.device_name || !payload.host) return false;
+
+        // tieto akcie potrebujú interface
+        const needsInterface = new Set([
+            "shutdown", "no-shutdown", "restart-interface",
+            "check_macaddress", "clear-counters", "show-counters", "show-status-int",
+            "configure-interface"
+        ]);
+
+        if (needsInterface.has(action) && !payload.interface) return false;
+
+        // creds: ak chceš, môžeš ich vyžadovať len pre WS alebo konkrétne akcie,
+        // ale pri REST ich pokojne nechaj prázdne (backend má .env)
+        return true;
     }
+
 
     /******************************************************************
      * UNIVERZÁLNA AKCIA: sendRequest()
      * - volá backend endpoint /{action}
      * - podľa odpovede zobrazí formátovaný výstup
      ******************************************************************/
+
     async function sendRequest(action) {
         const data = buildActionPayload(action);
 
-        if (!validateBase(data)) {
-            return showMessage("Vyplň device, host, username, password a interface.", "error");
+        if (!validateForAction(action, data)) {
+            return showMessage("Vyplň aspoň device + host (a pri niektorých akciách aj interface).", "error");
         }
 
         showMessage("Spracováva sa požiadavka…", "info");
@@ -513,7 +630,7 @@
         const payload = buildPortPayload();
         const resp = await fetch("http://localhost:8001/interface/compare-attrs", {
             method: "POST",
-            headers: {"Content-Type":"application/json"},
+            headers: {"Content-Type": "application/json"},
             cache: "no-store",
             body: JSON.stringify(payload)
         });
@@ -536,7 +653,7 @@
 
         const resp = await fetch("http://localhost:8001/interface/apply-replace", {
             method: "POST",
-            headers: {"Content-Type":"application/json"},
+            headers: {"Content-Type": "application/json"},
             cache: "no-store",
             body: JSON.stringify(payload)
         });
@@ -561,15 +678,15 @@
             data: {
                 labels: [],
                 datasets: [
-                    { label: "Input error packets", data: [], fill: false },
-                    { label: "Output error packets", data: [], fill: false }
+                    {label: "Input error packets", data: [], fill: false},
+                    {label: "Output error packets", data: [], fill: false}
                 ]
             },
             options: {
                 responsive: true,
                 scales: {
-                    x: { type: "time", time: { unit: "second" } },
-                    y: { beginAtZero: true }
+                    x: {type: "time", time: {unit: "second"}},
+                    y: {beginAtZero: true}
                 }
             }
         });
@@ -700,6 +817,8 @@
     $("subregionSelect").addEventListener("change", onSubregionChange);
     $("siteSelect").addEventListener("change", onSiteChange);
     $("deviceSelect").addEventListener("change", onDeviceChange);
+    $("clearMacBtn").addEventListener("click", clearMacTableUI);
+
 
     // Akčné tlačidlá (data-action)
     document.querySelectorAll("button[data-action]").forEach(btn => {

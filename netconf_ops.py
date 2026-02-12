@@ -68,6 +68,22 @@ class DeviceClient:
     Spravuje NETCONF a SSH (Netmiko) spojenie, a ponúka metódy na bežné operácie.
     """
 
+    def _try_connect_netconf(self, port: int) -> None:
+        try:
+            self.netconf = manager.connect(
+                host=self.host,
+                port=port,
+                username=self.username,
+                password=self.password,
+                hostkey_verify=False,
+                device_params={'name': self.netconf_device_name},
+                timeout=10,
+            )
+        except Exception as e:
+            # NETCONF je voliteľný – nepadáme, len log + None
+            logging.warning(f"[NETCONF] connect failed to {self.host}:{port} ({self.netconf_device_name}): {e}")
+            self.netconf = None
+
     def __init__(
             self,
             host: str,
@@ -84,7 +100,13 @@ class DeviceClient:
         self.ssh = None
         self.netconf_device_name = netconf_device_name
         self.netmiko_device_type = netmiko_device_type
-        self._connect_netconf(port)
+        self._try_connect_netconf(port)
+
+    def _require_netconf(self):
+        if not self.netconf:
+            raise RuntimeError(
+                "NETCONF session is not available (device may not have NETCONF enabled)."
+            )
 
     def _connect_netconf(self, port):
         try:
@@ -166,6 +188,66 @@ class DeviceClient:
              "vendor": e.get("VENDOR", "Not Found")}
             for e in entries
         ]
+
+    def clear_mac_table(
+            self,
+            platform: str,
+            interface: str | None = None,
+            vlan: int | None = None,
+            dynamic_only: bool = True,
+    ) -> dict:
+        """
+        Vymaže MAC address-table (FDB) s ohľadom na platformu (multivendor).
+        Preferuje SSH/CLI (Netmiko), lebo NETCONF podpora je vendor-špecifická.
+
+        platform: NetBox platform slug (napr. "ios-xe", "junos", "eos", "nxos")
+        """
+        # Validácia: len jeden scope naraz
+        scopes = sum([1 if interface else 0, 1 if vlan is not None else 0])
+        if scopes > 1:
+            raise ValueError("Zadaj buď interface alebo vlan, nie oboje.")
+
+        # Normalizácia platformy
+        p = (platform or "").strip().lower()
+
+        # Cisco / Arista style
+        def cisco_like_cmd():
+            base = "clear mac address-table"
+            if dynamic_only:
+                base += " dynamic"
+            if interface:
+                return f"{base} interface {interface}"
+            if vlan is not None:
+                return f"{base} vlan {vlan}"
+            return base
+
+        # JunOS style
+        def junos_cmd():
+            base = "clear ethernet-switching table"
+            if interface:
+                return f"{base} interface {interface}"
+            if vlan is not None:
+                return f"{base} vlan {vlan}"
+            return base
+
+        # Vyber príkazu podľa platformy
+        if p in ("ios", "ios-xe", "nxos", "eos"):
+            cmd = cisco_like_cmd()
+        elif p in ("junos",):
+            cmd = junos_cmd()
+        else:
+            raise ValueError(f"Nepodporovaná platforma pre clear MAC table: {platform}")
+
+        # Spustenie cez SSH
+        conn = self._ensure_ssh()
+        out = conn.send_command_timing(cmd)
+
+        # Confirm handling (niektoré zariadenia chcú Enter)
+        if "[confirm]" in out.lower() or "confirm" in out.lower():
+            out2 = conn.send_command_timing("\n")
+            out += out2
+
+        return {"command": cmd, "output": out}
 
     def show_counters(self, interface: str) -> list[dict]:
         """

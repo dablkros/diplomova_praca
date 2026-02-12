@@ -96,6 +96,17 @@ def get_drivers_for_device(device_name: str) -> dict:
         "netconf_device_name": mapping["netconf"],
     }
 
+class ClearMacTableRequest(BaseModel):
+    device_name: str
+    host: str
+    username: str | None = None
+    password: str | None = None
+
+    interface: str | None = None
+    vlan: int | None = None
+
+    dynamic_only: bool = True
+
 
 # =====================================================================================
 #                             EXISTUJÚCE ENDPOINTY
@@ -732,197 +743,41 @@ async def ws_live_counters(ws: WebSocket):
     finally:
         client.close()
 
-@app.post("/interface/compare-attrs")
-def compare_interface_attrs(data: PortCompareRequest):
-    user = data.username or SSH_USERNAME
-    pwd  = data.password or SSH_PASSWORD
+@app.post("/mac-table/clear")
+def clear_mac_table(data: ClearMacTableRequest):
+    # 1) creds
+    user = (data.username or "").strip() or SSH_USERNAME
+    pwd = (data.password or "").strip() or SSH_PASSWORD
 
-    nb_iface = get_nb_interface_json(data.device_name, data.interface)
-    nb_ip = get_nb_primary_ip_cidr(nb_iface["id"])
+    # 2) platform + drivers zo SoT (túto funkciu už máš z predchádzajúcich krokov)
+    drivers = get_drivers_for_device(data.device_name)
+    platform = drivers["platform"]
 
-    client = DeviceClient(data.host, user, pwd)
+    # 3) DeviceClient (už multivendor-ready)
+    client = DeviceClient(
+        data.host,
+        user,
+        pwd,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
-        # Device state (minimálne)
-        running_lines = normalize_cfg_lines(client.get_running_interface_block(data.interface))
-        dev_ip = client.get_interface_primary_ip(data.interface)
-
-        # derived device flags
-        dev_has_no_switchport = any(ln.strip().lower() == "no switchport" for ln in running_lines)
-        dev_desc = ""
-        for ln in running_lines:
-            if ln.lower().startswith("description "):
-                dev_desc = ln[len("description "):].strip()
-                break
-        dev_shutdown = any(ln.strip().lower() == "shutdown" for ln in running_lines)
-
-        # NB state
-        nb_enabled = bool(nb_iface.get("enabled", True))
-        nb_desc = nb_iface.get("description") or ""
-        nb_has_ip = nb_ip is not None
-        nb_is_l3 = nb_has_ip  # pravidlo: ak je IP v SoT -> L3
-
-        # compare table
-        rows = [
-            {
-                "field": "description",
-                "sot": nb_desc,
-                "device": dev_desc,
-                "match": (nb_desc == dev_desc),
-            },
-            {
-                "field": "enabled",
-                "sot": nb_enabled,
-                "device": (not dev_shutdown),
-                "match": (nb_enabled == (not dev_shutdown)),
-            },
-            {
-                "field": "l3_mode",
-                "sot": nb_is_l3,
-                "device": dev_has_no_switchport,
-                "match": (nb_is_l3 == dev_has_no_switchport),
-            },
-            {
-                "field": "primary_ipv4",
-                "sot": nb_ip,
-                "device": dev_ip,
-                "match": (nb_ip == dev_ip),
-            },
-        ]
-
-        in_sync = all(r["match"] for r in rows)
-
+        # 4) zavolaj clear
+        result = client.clear_mac_table(
+            platform=platform,
+            interface=data.interface,
+            vlan=data.vlan,
+            dynamic_only=data.dynamic_only,
+        )
         return {
             "device": data.device_name,
-            "host": data.host,
-            "interface": data.interface,
-            "in_sync": in_sync,
-            "rows": rows,
-            "nb_interface_id": nb_iface["id"],
+            "platform": platform,
+            "strategy": "ssh",
+            "command": result["command"],
+            "output": result["output"],
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         client.close()
-
-
-@app.post("/interface/apply-replace")
-def apply_interface_replace(data: PortApplyRequest):
-    user = data.username or SSH_USERNAME
-    pwd  = data.password or SSH_PASSWORD
-
-    nb_iface = get_nb_interface_json(data.device_name, data.interface)
-    nb_ip = get_nb_primary_ip_cidr(nb_iface["id"])
-
-    intended_lines = nb_to_cisco_intended_lines(nb_iface, nb_ip)
-
-    client = DeviceClient(data.host, user, pwd)
-    try:
-        cmds = [
-            f"default interface {data.interface}",
-            f"interface {data.interface}",
-            *intended_lines,
-            "end"
-        ]
-        output = client.send_config_lines(cmds)
-
-        return {
-            "stav": "APPLIED",
-            "interface": data.interface,
-            "intended": intended_lines,
-            "output": output
-        }
-    finally:
-        client.close()
-
-
-def normalize_cfg_lines(lines: list[str]) -> list[str]:
-    out = []
-    for ln in lines:
-        ln = ln.strip()
-        if not ln or ln == "!":
-            continue
-        if "building configuration" in ln.lower():
-            continue
-        out.append(ln)
-    return out
-
-
-def get_nb_interface_json(device_name: str, interface: str) -> dict:
-    r = requests.get(f"{NETBOX_URL}/api/dcim/devices/?name={device_name}", headers=netbox_headers)
-    r.raise_for_status()
-    devs = r.json().get("results") or []
-    if not devs:
-        raise HTTPException(status_code=404, detail=f"Device '{device_name}' not found")
-    dev_id = devs[0]["id"]
-
-    r2 = requests.get(
-        f"{NETBOX_URL}/api/dcim/interfaces/?device_id={dev_id}&name={interface}",
-        headers=netbox_headers
-    )
-    r2.raise_for_status()
-    ifaces = r2.json().get("results") or []
-    if not ifaces:
-        raise HTTPException(status_code=404, detail=f"Interface '{interface}' not found on '{device_name}'")
-    return ifaces[0]
-
-
-def get_nb_primary_ip_cidr(interface_id: int) -> str | None:
-    """
-    Vráti prvú IPv4 priradenú k interface v CIDR (napr 192.168.60.1/24) alebo None.
-    """
-    r = requests.get(
-        f"{NETBOX_URL}/api/ipam/ip-addresses/?interface_id={interface_id}&limit=50",
-        headers=netbox_headers
-    )
-    r.raise_for_status()
-    ips = r.json().get("results") or []
-    # zober prvú IPv4
-    for ipobj in ips:
-        addr = ipobj.get("address")
-        if not addr:
-            continue
-        try:
-            ipaddress.IPv4Interface(addr)
-            return addr
-        except Exception:
-            continue
-    return None
-
-
-def cidr_to_ip_mask(cidr: str) -> tuple[str, str]:
-    iface = ipaddress.ip_interface(cidr)
-    return str(iface.ip), str(iface.network.netmask)
-
-
-def nb_to_cisco_intended_lines(nb_iface: dict, nb_ip_cidr: str | None) -> list[str]:
-    """
-    Cisco intended config z NB (len základ): description, L2/L3 podľa IP, vlan/mode, shutdown/no shut.
-    """
-    intended = []
-
-    desc = nb_iface.get("description") or ""
-    if desc:
-        intended.append(f"description {desc}")
-
-    enabled = bool(nb_iface.get("enabled", True))
-
-    # L3 ak existuje IP v SoT, inak L2 podľa mode
-    if nb_ip_cidr:
-        intended.append("no switchport")
-        ip, mask = cidr_to_ip_mask(nb_ip_cidr)
-        intended.append(f"ip address {ip} {mask}")
-    else:
-        mode = (nb_iface.get("mode") or {}).get("value")  # access/tagged/None
-        if mode == "access":
-            intended.append("switchport mode access")
-            untag = nb_iface.get("untagged_vlan")
-            if isinstance(untag, dict) and untag.get("vid") is not None:
-                intended.append(f"switchport access vlan {untag['vid']}")
-        elif mode == "tagged":
-            intended.append("switchport mode trunk")
-            tagged = nb_iface.get("tagged_vlans") or []
-            vids = [v.get("vid") for v in tagged if isinstance(v, dict) and v.get("vid") is not None]
-            if vids:
-                intended.append(f"switchport trunk allowed vlan {','.join(str(v) for v in vids)}")
-
-    intended.append("no shutdown" if enabled else "shutdown")
-    return intended
-
