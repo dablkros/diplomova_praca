@@ -200,7 +200,7 @@
 
     <button data-action="configure-interface">Konfiguruj interface</button>
 
-    <button onclick="compareAttrs()">Porovnať port (atribúty)</button>
+    <button id="compareConfigBtn">Porovnať port (config diff)</button>
     <button onclick="applyReplace()">Aplikovať REPLACE (SoT)</button>
 
     <button id="measureBtn">Štart error graf</button>
@@ -413,6 +413,86 @@
             showMessage(e.message, "error");
         }
     }
+
+    function escapeHtml(str) {
+        return (str || "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;");
+    }
+
+    function renderDiff(diffLines) {
+        // unified diff: --- +++ @@, - removed, + added, " " context
+        return (diffLines || []).map(line => {
+            const safe = escapeHtml(line);
+
+            if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('@@')) {
+                return `<div><strong>${safe}</strong></div>`;
+            }
+            if (line.startsWith('+')) {
+                return `<div style="color: #0a7a0a;">${safe}</div>`;
+            }
+            if (line.startsWith('-')) {
+                return `<div style="color: #b00020;">${safe}</div>`;
+            }
+            return `<div>${safe}</div>`;
+        }).join("");
+    }
+
+    async function compareConfigUI() {
+        const deviceName = $("deviceSelect").value;
+        const host = $("host").value;
+        const iface = $("interfaceSelect").value;
+
+        if (!deviceName || !host || !iface) {
+            return showMessage("Vyber zariadenie, host a rozhranie.", "error");
+        }
+
+        // creds posielaj len keď sú vyplnené (aby si neprebíjala .env)
+        const u = $("username").value.trim();
+        const p = $("password").value;
+
+        const payload = {
+            device_name: deviceName,
+            host: host,
+            interface: iface
+        };
+        if (u) payload.username = u;
+        if (p) payload.password = p;
+
+        showMessage("Porovnávam SoT vs device…", "info");
+
+        try {
+            const res = await apiPost("/interface/compare-config", payload);
+
+            const status = res.in_sync ? "IN SYNC ✅" : "OUT OF SYNC ⚠️";
+
+// diffLines deklaruj iba raz
+            const diffLines = (res.config && res.config.diff) ? res.config.diff : (res.diff || []);
+
+            const diffCount = diffLines.filter(l =>
+                (l.startsWith("+") && !l.startsWith("+++")) ||
+                (l.startsWith("-") && !l.startsWith("---"))
+            ).length;
+
+            $("diffOutput").innerHTML = renderDiff(diffLines);
+
+// (tu si potom nastav summary text)
+            $("diffSummary").style.display = "block";
+            $("diffSummary").textContent =
+                `Device: ${res.device} Platform: ${res.platform} Interface: ${res.interface} ` +
+                `Status: ${status}  Rozdiely: ${diffCount}`;
+
+            openModal("diffModal");
+
+
+// a message box schovaj
+            showMessage("", "info");
+        } catch (e) {
+            showMessage(`Chyba: ${e.message}`, "error");
+        }
+    }
+
 
     async function clearMacTableUI() {
         const deviceSelect = $("deviceSelect");
@@ -645,6 +725,41 @@
         box.innerHTML = `<strong>In sync:</strong> ${json.in_sync ? "Áno ✅" : "Nie ❌"}<br><br>${lines}`;
         box.className = json.in_sync ? "success" : "error";
         box.style.display = "block";
+
+        function diffCount(diffLines) {
+            return (diffLines || []).filter(l => (
+                (l.startsWith("+") && !l.startsWith("+++")) ||
+                (l.startsWith("-") && !l.startsWith("---"))
+            )).length;
+        }
+
+        function renderCompareResult(res) {
+            const overall = res.in_sync ? "IN SYNC ✅" : "OUT OF SYNC ⚠️";
+
+            const state = res.state || {};
+            const config = res.config || {};
+
+            const stateLine =
+                `SoT enabled: ${state.sot_enabled}\n` +
+                `Device admin_up: ${state.device_admin_up}\n` +
+                `Device oper_up: ${state.device_oper_up}\n` +
+                `State in sync: ${state.in_sync}`;
+
+            const cfgDiff = (config.diff || []).join("\n");
+            const cfgDiffCnt = diffCount(config.diff || []);
+
+            return (
+                `Device: ${res.device}  Platform: ${res.platform}\n` +
+                `Interface: ${res.interface}\n` +
+                `Status: ${overall}\n\n` +
+
+                `=== STAV (TextFSM) ===\n` +
+                `${stateLine}\n\n` +
+
+                `=== CONFIG DIFF (rozdyly: ${cfgDiffCnt}) ===\n` +
+                `${cfgDiff || "(žiadny diff)"}`
+            );
+        }
     }
 
     async function applyReplace() {
@@ -812,12 +927,40 @@
         }
     }
 
+    async function applyMerge() {
+        const payload = buildPortPayload();
+        if (!confirm("MERGE doplní/nastaví to, čo je v SoT (bez resetu portu). Pokračovať?")) return;
+
+        const resp = await fetch("http://localhost:8001/interface/apply-merge", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            cache: "no-store",
+            body: JSON.stringify(payload)
+        });
+        const json = await resp.json();
+        if (!resp.ok || json.detail) return showMessage(`Chyba: ${json.detail || "apply failed"}`, "error");
+
+        showMessage("Hotovo ✅ MERGE aplikovaný.", "success");
+        // zobraz, čo reálne poslal backend a čo vrátilo zariadenie
+        const text =
+            `APPLIED MERGE ✅\n\n` +
+            `Commands:\n${(json.commands || []).join("\n")}\n\n` +
+            `Device output:\n${json.output || ""}`;
+
+        $("diffSummary").style.display = "block";
+        $("diffSummary").textContent = text;
+    }
+
+
     // Select onchange
     $("regionSelect").addEventListener("change", onRegionChange);
     $("subregionSelect").addEventListener("change", onSubregionChange);
     $("siteSelect").addEventListener("change", onSiteChange);
     $("deviceSelect").addEventListener("change", onDeviceChange);
     $("clearMacBtn").addEventListener("click", clearMacTableUI);
+    $("compareConfigBtn").addEventListener("click", compareConfigUI);
+    $("diffApplyMergeBtn").addEventListener("click", applyMerge);
+    $("diffApplyReplaceBtn").addEventListener("click", applyReplace);
 
 
     // Akčné tlačidlá (data-action)
@@ -838,6 +981,10 @@
     $("closeDiffModal").addEventListener("click", () => closeModal("diffModal"));
 
     // Graf a live
+    function validateBase(payload) {
+        return payload.device_name && payload.host && payload.interface;
+    }
+
     $("measureBtn").addEventListener("click", startOrStopErrorChart);
     $("liveBtn").addEventListener("click", startLiveCounters);
     $("stopLiveBtn").addEventListener("click", stopLiveCounters);

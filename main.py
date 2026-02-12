@@ -1,6 +1,8 @@
 import asyncio
+import difflib
 import ipaddress
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -293,10 +295,10 @@ def show_interface_status(data: DeviceInfo):
     )
 
     try:
-        counters = client.show_counters(data.interface)
+        state = client.get_interface_status_textfsm(data.interface)
         return {
-            "stav": f"Packet counters pre {data.interface}",
-            "counters": counters
+            "stav": f"Stav interface {data.interface}",
+            "state": state
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -781,3 +783,320 @@ def clear_mac_table(data: ClearMacTableRequest):
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         client.close()
+
+def cidr_to_ip_mask(cidr: str) -> tuple[str, str]:
+    iface = ipaddress.ip_interface(cidr)
+    return str(iface.ip), str(iface.network.netmask)
+
+def nb_get_interface_detail(device_name: str, interface_name: str) -> dict:
+    # 1) nájdi interface podľa device + name
+    r = requests.get(
+        f"{NETBOX_URL}/api/dcim/interfaces/?device={device_name}&name={interface_name}",
+        headers=netbox_headers,
+    )
+    r.raise_for_status()
+    results = r.json().get("results") or []
+    if not results:
+        raise HTTPException(404, detail=f"Interface '{interface_name}' na device '{device_name}' neexistuje v NetBoxe.")
+    iface = results[0]
+
+    # 2) dotiahni IP adresy priradené k interface ID
+    iface_id = iface["id"]
+    r2 = requests.get(
+        f"{NETBOX_URL}/api/ipam/ip-addresses/?interface_id={iface_id}&limit=50",
+        headers=netbox_headers,
+    )
+    r2.raise_for_status()
+    ips = r2.json().get("results") or []
+
+    return {"iface": iface, "ips": ips}
+
+#def nb_to_intended_lines_cisco(nb_iface: dict, nb_ips: list[dict]) -> list[str]:
+    lines: list[str] = []
+    has_ip = any("." in (ip.get("address") or "") for ip in nb_ips)
+
+    if has_ip:
+        lines.append("no switchport")
+
+    # description
+    desc = nb_iface.get("description") or ""
+    if desc:
+        lines.append(f"description {desc}")
+
+    # enabled -> shutdown/no shutdown
+    enabled = nb_iface.get("enabled", True)
+    lines.append("no shutdown" if enabled else "shutdown")
+
+    # mode: NetBox často vracia "access"/"tagged"/"tagged-all"/None podľa verzie
+    mode = nb_iface.get("mode")
+    untagged = nb_iface.get("untagged_vlan")
+    tagged = nb_iface.get("tagged_vlans") or []
+
+    # Ak je mode priamo "access"/"tagged", mapneme na Cisco príkazy
+    if mode == "access":
+        lines.append("switchport")
+        lines.append("switchport mode access")
+        if untagged and untagged.get("vid"):
+            lines.append(f"switchport access vlan {untagged['vid']}")
+
+    elif mode in ("tagged", "tagged-all"):
+        lines.append("switchport")
+        lines.append("switchport mode trunk")
+
+        # tagged-all = trunk all -> na Cisco je často default, necháme bez "allowed"
+        if mode == "tagged":
+            vids = []
+            for v in tagged:
+                vid = v.get("vid")
+                if vid is not None:
+                    vids.append(str(vid))
+            if vids:
+                lines.append(f"switchport trunk allowed vlan {','.join(vids)}")
+
+        # native VLAN z untagged_vlan (ak je)
+        if untagged and untagged.get("vid"):
+            lines.append(f"switchport trunk native vlan {untagged['vid']}")
+
+    # IP adresy – ak existujú a interface nie je čisto L2
+    # NetBox ipam/ip-addresses results majú napr. {"address":"10.0.0.1/24", ...}
+    # Vyberieme prvú IPv4 (MVP)
+    ip4 = None
+    for ip in nb_ips:
+        addr = ip.get("address") or ""
+        if "." in addr:
+            ip4 = addr
+            break
+    if ip4:
+        # Cisco CLI používa masku, nie prefix – v MVP necháme v prefix tvare a len to zobrazíme v diffe
+        # (ak chceš, neskôr spravíme prefix->mask konverziu)
+        ip, mask = cidr_to_ip_mask(ip4)
+        lines.append(f"ip address {ip} {mask}")
+
+    return lines
+
+
+def nb_to_intended_lines_cisco(nb_iface: dict, nb_ips: list[dict], *, include_admin: bool = True) -> list[str]:
+    lines: list[str] = []
+
+    # zisti či máme IPv4
+    ip4 = next((ip.get("address") for ip in nb_ips if "." in (ip.get("address") or "")), None)
+    is_l3 = bool(ip4)
+
+    # description
+    desc = nb_iface.get("description") or ""
+    if desc:
+        lines.append(f"description {desc}")
+
+    # enabled -> shutdown/no shutdown
+        # admin state len ak chceme
+        if include_admin:
+            enabled = nb_iface.get("enabled", True)
+            lines.append("no shutdown" if enabled else "shutdown")
+
+    if is_l3:
+        lines.insert(0, "no switchport")
+        ip, mask = cidr_to_ip_mask(ip4)
+        lines.append(f"ip address {ip} {mask}")
+        return lines
+
+    # L2 časť
+    mode = nb_iface.get("mode")
+    untagged = nb_iface.get("untagged_vlan")
+    tagged = nb_iface.get("tagged_vlans") or []
+
+    if mode == "access":
+        lines.append("switchport")
+        lines.append("switchport mode access")
+        if untagged and untagged.get("vid"):
+            lines.append(f"switchport access vlan {untagged['vid']}")
+    elif mode in ("tagged", "tagged-all"):
+        lines.append("switchport")
+        lines.append("switchport mode trunk")
+        if mode == "tagged":
+            vids = [str(v["vid"]) for v in tagged if v.get("vid") is not None]
+            if vids:
+                lines.append(f"switchport trunk allowed vlan {','.join(vids)}")
+        if untagged and untagged.get("vid"):
+            lines.append(f"switchport trunk native vlan {untagged['vid']}")
+
+    return lines
+
+
+def nb_to_intended_lines(platform: str, nb_iface: dict, nb_ips: list[dict], *, include_admin: bool = True) -> list[str]:
+    p = (platform or "").lower()
+
+    if p in ("ios-xe", "ios"):
+        return nb_to_intended_lines_cisco(nb_iface, nb_ips, include_admin=include_admin)
+
+    # ak máš ďalších vendorov:
+    # elif p == "junos":
+    #     return nb_to_intended_lines_junos(nb_iface, nb_ips, include_admin=include_admin)
+
+    # fallback:
+    return []
+
+
+import re
+
+def normalize_lines(lines: list[str], *, mode: str = "managed") -> list[str]:
+    """
+    mode:
+      - "managed": porovnávaj len riadky, ktoré chceme riadiť zo SoT (MVP)
+      - "all": porovnávaj všetko (prísny režim)
+    """
+    drop_prefixes = ("current configuration", "building configuration")
+    drop_exact = {"end", "!"}
+
+    out: list[str] = []
+
+    for ln in lines:
+        ln = re.sub(r"\s+", " ", (ln or "").strip())
+        if not ln:
+            continue
+
+        low = ln.lower()
+        if any(low.startswith(p) for p in drop_prefixes):
+            continue
+        if low in drop_exact:
+            continue
+
+        if mode == "managed":
+            # MVP whitelist – riadime iba základné veci
+            keep = (
+                    low.startswith("description ")
+                    or low == "no switchport"
+                    or low.startswith("switchport ")
+                    or low.startswith("ip address ")
+            )
+            if not keep:
+                continue
+
+        out.append(ln)
+
+    return sorted(set(out))
+
+
+class CompareConfigRequest(BaseModel):
+    device_name: str
+    host: str
+    interface: str
+    username: str | None = None
+    password: str | None = None
+
+
+@app.post("/interface/compare-config")
+def compare_config(data: CompareConfigRequest):
+    user = (data.username or "").strip() or SSH_USERNAME
+    pwd  = (data.password or "").strip() or SSH_PASSWORD
+
+    drivers = get_drivers_for_device(data.device_name)
+    platform = drivers["platform"]
+
+    # 1) SoT intended
+    sot = nb_get_interface_detail(data.device_name, data.interface)
+    intended = nb_to_intended_lines(platform, sot["iface"], sot["ips"], include_admin=False)
+
+    # 2) Device running
+    client = DeviceClient(
+        data.host,
+        user,
+        pwd,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+    try:
+        running = client.get_running_interface_block(data.interface)
+        status = client.get_interface_status_textfsm(data.interface)
+    finally:
+        client.close()
+
+        # SoT admin state (NetBox)
+    sot_enabled = bool(sot["iface"].get("enabled", True))
+
+    # Device admin/oper (ak status vrátil error, nech je None)
+    dev_admin_up = status.get("admin_up") if isinstance(status, dict) else None
+    dev_oper_up = status.get("oper_up") if isinstance(status, dict) else None
+
+    state_in_sync = (dev_admin_up is None) or (sot_enabled == dev_admin_up)
+
+    # 3) Normalize + diff
+    intended_n = normalize_lines(intended, mode="managed")
+    running_n = normalize_lines(running, mode="managed")
+
+    diff = list(difflib.unified_diff(
+        running_n,
+        intended_n,
+        fromfile="device_running",
+        tofile="sot_intended",
+        lineterm=""
+    ))
+
+    return {
+        "device": data.device_name,
+        "platform": platform,
+        "interface": data.interface,
+
+        "state": {
+            "sot_enabled": sot_enabled,
+            "device_admin_up": dev_admin_up,
+            "device_oper_up": dev_oper_up,
+            "raw": status,
+            "in_sync": state_in_sync,
+        },
+
+        "config": {
+            "in_sync": running_n == intended_n,
+            "intended_lines": intended_n,
+            "running_lines": running_n,
+            "diff": diff,
+        },
+
+        # celkové vyhodnotenie:
+        "in_sync": (running_n == intended_n) and state_in_sync,
+    }
+
+
+@app.post("/interface/apply-merge")
+def apply_interface_merge(data: CompareConfigRequest):  # môžeš použiť ten istý model
+    user = (data.username or "").strip() or SSH_USERNAME
+    pwd  = (data.password or "").strip() or SSH_PASSWORD
+
+    drivers = get_drivers_for_device(data.device_name)
+    platform = drivers["platform"]
+
+    # 1) SoT -> intended lines (rovnako ako compare-config)
+    sot = nb_get_interface_detail(data.device_name, data.interface)
+    intended = nb_to_intended_lines(platform, sot["iface"], sot["ips"])
+
+    # 2) Push cez SSH (Netmiko)
+    client = DeviceClient(
+        data.host,
+        user,
+        pwd,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+    try:
+        cmds = [f"interface {data.interface}"]
+
+        for line in intended:
+            if line.lower().startswith("ip address "):
+                cmds.append("no ip address")
+            cmds.append(line)
+
+        # ak máš v DeviceClient metódu send_config_lines / send_config_set, použi ju
+        output = client.send_config_lines(cmds)
+        return {
+            "status": "APPLIED_MERGE",
+            "device": data.device_name,
+            "platform": platform,
+            "interface": data.interface,
+            "commands": cmds,
+            "output": output,
+        }
+    finally:
+        client.close()
+
+
+
+

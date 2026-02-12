@@ -156,6 +156,66 @@ class DeviceClient:
         output = conn.send_command(f"show mac address-table interface {interface}")
         return self._parse_mac_textfsm(output)
 
+    def get_interface_status_textfsm(self, interface: str) -> dict:
+        """
+        Cisco: zistí stav rozhrania cez 'show ip interface brief' + TextFSM.
+        Vracia:
+          {
+            "interface": "...",
+            "ip_address": "...",
+            "status": "...",     # up | down | administratively down | ...
+            "protocol": "...",   # up | down
+            "admin_up": bool,
+            "oper_up": bool
+          }
+        """
+        conn = self._ensure_ssh()
+        output = conn.send_command("show ip interface brief")
+
+        template_path = os.path.join("templates", "cisco_ios_show_ip_interface_brief.textfsm")
+        with open(template_path) as tpl:
+            fsm = textfsm.TextFSM(tpl)
+            parsed = fsm.ParseText(output)
+
+        rows = [dict(zip(fsm.header, row)) for row in parsed]
+
+        # TextFSM šablóny niekedy vracajú názvy polí rôzne, tak robustne:
+        def pick(d, *keys):
+            for k in keys:
+                if k in d and d[k] is not None:
+                    return d[k]
+            return None
+
+        target = None
+        for r in rows:
+            ifname = pick(r, "INTERFACE", "INTF", "NAME")
+            if ifname == interface:
+                target = r
+                break
+
+        if not target:
+            return {
+                "interface": interface,
+                "error": f"Interface '{interface}' not found in 'show ip interface brief'"
+            }
+
+        ip_addr = pick(target, "IP_ADDRESS", "IPADDR", "IP")
+        status = (pick(target, "STATUS", "STATE") or "").strip().lower()
+        proto = (pick(target, "PROTOCOL", "PROTO") or "").strip().lower()
+
+        # Cisco typicky: "administratively down" => admin down
+        admin_up = status != "administratively down"
+        oper_up = (status == "up" and proto == "up")
+
+        return {
+            "interface": interface,
+            "ip_address": ip_addr,
+            "status": status,
+            "protocol": proto,
+            "admin_up": admin_up,
+            "oper_up": oper_up,
+        }
+
     def _parse_mac_textfsm(self, raw_output: str) -> list:
         """
         Parsuje surový CLI výstup cez TextFSM a vráti zoznam slovníkov s plnou tabuľkou.
