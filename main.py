@@ -282,6 +282,7 @@ def show_interface_counters(data: DeviceInfo):
     finally:
         client.close()
 
+
 @app.post("/show-status-int")
 def show_interface_status(data: DeviceInfo):
     drivers = get_drivers_for_device(data.device_name)

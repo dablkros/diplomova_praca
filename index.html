@@ -847,6 +847,7 @@
     function startOrStopErrorChart() {
         const btn = $("measureBtn");
 
+
         // Ak WS nebeží -> štart
         if (!ws || ws.readyState !== WebSocket.OPEN) {
             const payload = buildBasePayload();

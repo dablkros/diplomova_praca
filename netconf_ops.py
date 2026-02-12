@@ -161,6 +161,7 @@ class DeviceClient:
         Vráti user-friendly stav pre UI:
           Link (up/down), Protocol (up/down), Duplex, Speed
         """
+
         conn = self._ensure_ssh()
 
         # najistejšie pre duplex/speed je priamo show interface <iface>
