@@ -1,5 +1,4 @@
 import asyncio
-import difflib
 import ipaddress
 import os
 from pathlib import Path
@@ -24,6 +23,14 @@ netbox_headers = {
     "Content-Type": "application/json"
 }
 
+PLATFORM_MAP = {
+    "ios-xe": {"netmiko": "cisco_ios", "netconf": "iosxe"},
+    "ios":    {"netmiko": "cisco_ios", "netconf": "ios"},
+    "nxos":   {"netmiko": "cisco_nxos", "netconf": "nxos"},
+    "junos":  {"netmiko": "juniper_junos", "netconf": "junos"},
+    "eos":    {"netmiko": "arista_eos", "netconf": "eos"},
+}
+
 app = FastAPI()
 
 app.add_middleware(
@@ -44,6 +51,51 @@ class DeviceInfo(BaseModel):
     username: str | None = None
     password: str | None = None
 
+def get_device_platform_slug(device_name: str) -> str | None:
+    """Vráti platform.slug z NetBoxu pre device_name (alebo None)."""
+    r = requests.get(
+        f"{NETBOX_URL}/api/dcim/devices/?name={device_name}",
+        headers=netbox_headers
+    )
+    r.raise_for_status()
+    results = r.json().get("results") or []
+    if not results:
+        raise HTTPException(status_code=404, detail=f"Device '{device_name}' not found in NetBox")
+
+    dev = results[0]
+    platform = dev.get("platform")
+    if not platform:
+        return None
+
+    # NetBox typicky vracia {"id":..,"name":..,"slug":..}
+    return platform.get("slug") or platform.get("name")
+
+
+def get_drivers_for_device(device_name: str) -> dict:
+    """
+    Podľa platformy v SoT vráti dict:
+    {"platform": "...", "netmiko_device_type": "...", "netconf_device_name": "..."}
+    """
+    slug = get_device_platform_slug(device_name)
+    if not slug:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Device '{device_name}' nemá v NetBoxe nastavenú platformu (SoT)."
+        )
+
+    mapping = PLATFORM_MAP.get(slug)
+    if not mapping:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Platform '{slug}' nie je namapovaná v PLATFORM_MAP."
+        )
+
+    return {
+        "platform": slug,
+        "netmiko_device_type": mapping["netmiko"],
+        "netconf_device_name": mapping["netconf"],
+    }
+
 
 # =====================================================================================
 #                             EXISTUJÚCE ENDPOINTY
@@ -52,21 +104,47 @@ class DeviceInfo(BaseModel):
 @app.get("/devices")
 def get_devices():
     """
-    Vráti zoznam zariadení (devices) z NetBoxu,
-    pričom extrahuje name a primary_ip4 (ak existuje).
+    Vráti zoznam zariadení z NetBoxu:
+    - name
+    - primary_ip4
+    - manufacturer
+    - platform
+    - model
     """
     try:
         resp = requests.get(f"{NETBOX_URL}/api/dcim/devices/?limit=100", headers=netbox_headers)
+        resp.raise_for_status()
         data = resp.json()["results"]
+
         result = []
         for device in data:
             ip = device.get("primary_ip4") or {}
             ip_addr = ip.get("address", "").split("/")[0] if ip else ""
-            result.append({"name": device["name"], "ip": ip_addr})
+
+            manufacturer = None
+            if device.get("device_type") and device["device_type"].get("manufacturer"):
+                manufacturer = device["device_type"]["manufacturer"].get("name")
+
+            platform = None
+            if device.get("platform"):
+                platform = device["platform"].get("slug") or device["platform"].get("name")
+
+            model = None
+            if device.get("device_type"):
+                model = device["device_type"].get("model")
+
+            result.append({
+                "name": device["name"],
+                "ip": ip_addr,
+                "manufacturer": manufacturer,
+                "platform": platform,
+                "model": model,
+            })
+
         return result
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/interfaces")
 def get_interfaces(device_name: str = Query(..., description="Názov zariadenia")):
@@ -127,7 +205,14 @@ def get_users():
 
 @app.post("/check_macaddress")
 def over_mac_adresu(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
     try:
         macs = client.get_mac_table(data.interface)
         return {
@@ -144,7 +229,15 @@ def over_mac_adresu(data: DeviceInfo):
 def vycisti_dhcp(data: DeviceInfo):
     if not data.ip_address:
         raise HTTPException(status_code=400, detail="Chýba IP adresa")
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         resp = client.clear_dhcp(data.ip_address)
         return {"stav": f"DHCP lease pre {data.ip_address} uvoľnený", "odpoveď": str(resp)}
@@ -156,7 +249,15 @@ def vycisti_dhcp(data: DeviceInfo):
 
 @app.post("/show-counters")
 def show_interface_counters(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         counters = client.show_counters(data.interface)
         return {
@@ -171,7 +272,15 @@ def show_interface_counters(data: DeviceInfo):
 
 @app.post("/show-status-int")
 def show_interface_status(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         counters = client.show_counters(data.interface)
         return {
@@ -186,7 +295,15 @@ def show_interface_status(data: DeviceInfo):
 
 @app.post("/show-dhcp-bindings")
 def show_dhcp_bindings(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         bindings = client.show_dhcp_bindings()
         return {
@@ -201,7 +318,15 @@ def show_dhcp_bindings(data: DeviceInfo):
 
 @app.post("/clear-dhcp-binding")
 def clear_dhcp_binding(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         result = client.clear_dhcp_binding(data.ip_address)
         return {
@@ -216,7 +341,15 @@ def clear_dhcp_binding(data: DeviceInfo):
 
 @app.post("/clear-counters")
 def reset_counters(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         result = client.clear_counters(data.interface)
         return {
@@ -229,7 +362,15 @@ def reset_counters(data: DeviceInfo):
 
 @app.post("/shutdown")
 def vypni_interface(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         resp = client.shutdown(data.interface)
         return {"stav": "interface vypnutý", "odpoveď": str(resp)}
@@ -241,7 +382,15 @@ def vypni_interface(data: DeviceInfo):
 
 @app.post("/no-shutdown")
 def zapni_interface(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         resp = client.no_shutdown(data.interface)
         return {"stav": "interface zapnutý", "odpoveď": str(resp)}
@@ -253,7 +402,15 @@ def zapni_interface(data: DeviceInfo):
 
 @app.post("/restart-interface")
 def restart_iface(data: DeviceInfo):
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         resp1, resp2 = client.restart(data.interface)
         return {
@@ -460,7 +617,15 @@ def get_nb_interface(device_name: str, interface: str) -> dict:
 def configure_interface(data: DeviceInfo):
     params = get_nb_interface(data.device_name, data.interface)
     print(f"[DEBUG] NetBox returned for {data.device_name}/{data.interface}: {params!r}")
-    client = DeviceClient(data.host, SSH_USERNAME, SSH_PASSWORD)
+    drivers = get_drivers_for_device(data.device_name)
+    client = DeviceClient(
+        data.host,
+        SSH_USERNAME,
+        SSH_PASSWORD,
+        netconf_device_name=drivers["netconf_device_name"],
+        netmiko_device_type=drivers["netmiko_device_type"],
+    )
+
     try:
         output = client.configure_interface_cli(
             interface=data.interface,

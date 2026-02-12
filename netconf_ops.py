@@ -11,9 +11,10 @@ from netmiko import ConnectHandler
 from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel
 
-MACVENDORS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImp0aSI6IjNiYTdlMGJiLWVmNTAtNGZlZi1iNGMzLTgzOTM3MzMxZDAwYyJ9.eyJpc3MiOiJtYWN2ZW5kb3JzIiwiYXVkIjoibWFjdmVuZG9ycyIsImp0aSI6IjNiYTdlMGJiLWVmNTAtNGZlZi1iNGMzLTgzOTM3MzMxZDAwYyIsImlhdCI6MTc0NTE2MDg3NywiZXhwIjoyMDU5NjU2ODc3LCJzdWIiOiIxNTkwMCIsInR5cCI6ImFjY2VzcyJ9.bAQiyVtftjLZM7gdIoFMbEDEj08lc_QK5Kk8CmCCVXhyy-oFN9lAwBx_zdwIC5OW3Lj_DLY-s5Na56oYJMqJvg"
-
 env = Environment(loader=FileSystemLoader("templates"))
+
+def get_macvendors_token() -> str | None:
+    return os.getenv("MACVENDORS_TOKEN")
 
 
 def render_template(template_name, **kwargs):
@@ -44,10 +45,11 @@ def get_mac_vendor(mac_address: str) -> str:
     Vráti názov výrobcu pre danú MAC adresu pomocou macvendors v1 API,
     """
     url = f"https://api.macvendors.com/v1/lookup/{mac_address}"
-    headers = {
-        "Authorization": f"Bearer {MACVENDORS_TOKEN}",
-        "Accept": "application/json"
-    }
+    token = get_macvendors_token()
+    if not token:
+        return "Token missing"
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
         resp = requests.get(url, headers=headers, timeout=5)
         resp.raise_for_status()
@@ -66,12 +68,22 @@ class DeviceClient:
     Spravuje NETCONF a SSH (Netmiko) spojenie, a ponúka metódy na bežné operácie.
     """
 
-    def __init__(self, host: str, username: str, password: str, port: int = 830):
+    def __init__(
+            self,
+            host: str,
+            username: str,
+            password: str,
+            port: int = 830,
+            netconf_device_name: str = "iosxe",
+            netmiko_device_type: str = "cisco_ios",
+    ):
         self.host = host
         self.username = username
         self.password = password
         self.netconf = None
         self.ssh = None
+        self.netconf_device_name = netconf_device_name
+        self.netmiko_device_type = netmiko_device_type
         self._connect_netconf(port)
 
     def _connect_netconf(self, port):
@@ -82,7 +94,7 @@ class DeviceClient:
                 username=self.username,
                 password=self.password,
                 hostkey_verify=False,
-                device_params={'name': 'iosxe'}
+                device_params={'name': self.netconf_device_name}
             )
         except Exception as e:
             raise RuntimeError(f"NETCONF connect failed: {e}")
@@ -90,7 +102,7 @@ class DeviceClient:
     def _ensure_ssh(self):
         if not self.ssh:
             self.ssh = ConnectHandler(
-                device_type="cisco_ios",
+                device_type=self.netmiko_device_type,
                 host=self.host,
                 username=self.username,
                 password=self.password,
