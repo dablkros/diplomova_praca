@@ -282,7 +282,6 @@ def show_interface_counters(data: DeviceInfo):
     finally:
         client.close()
 
-
 @app.post("/show-status-int")
 def show_interface_status(data: DeviceInfo):
     drivers = get_drivers_for_device(data.device_name)
@@ -293,17 +292,15 @@ def show_interface_status(data: DeviceInfo):
         netconf_device_name=drivers["netconf_device_name"],
         netmiko_device_type=drivers["netmiko_device_type"],
     )
-
     try:
-        state = client.get_interface_status_textfsm(data.interface)
+        state = client.get_interface_state(data.interface)
         return {
             "stav": f"Stav interface {data.interface}",
             "state": state
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
+
 
 
 @app.post("/show-dhcp-bindings")

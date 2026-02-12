@@ -156,64 +156,52 @@ class DeviceClient:
         output = conn.send_command(f"show mac address-table interface {interface}")
         return self._parse_mac_textfsm(output)
 
-    def get_interface_status_textfsm(self, interface: str) -> dict:
+    def get_interface_state(self, interface: str) -> dict:
         """
-        Cisco: zistí stav rozhrania cez 'show ip interface brief' + TextFSM.
-        Vracia:
-          {
-            "interface": "...",
-            "ip_address": "...",
-            "status": "...",     # up | down | administratively down | ...
-            "protocol": "...",   # up | down
-            "admin_up": bool,
-            "oper_up": bool
-          }
+        Vráti user-friendly stav pre UI:
+          Link (up/down), Protocol (up/down), Duplex, Speed
         """
         conn = self._ensure_ssh()
-        output = conn.send_command("show ip interface brief")
 
-        template_path = os.path.join("templates", "cisco_ios_show_ip_interface_brief.textfsm")
+        # najistejšie pre duplex/speed je priamo show interface <iface>
+        raw = conn.send_command(f"show interface {interface}")
+
+        # parsuj cez TextFSM šablónu (ktorú už máš)
+        template_path = os.path.join("templates", "cisco_ios_show_interfaces.textfsm")
         with open(template_path) as tpl:
             fsm = textfsm.TextFSM(tpl)
-            parsed = fsm.ParseText(output)
+            parsed = fsm.ParseText(raw)
 
         rows = [dict(zip(fsm.header, row)) for row in parsed]
-
-        # TextFSM šablóny niekedy vracajú názvy polí rôzne, tak robustne:
-        def pick(d, *keys):
-            for k in keys:
-                if k in d and d[k] is not None:
-                    return d[k]
-            return None
-
-        target = None
-        for r in rows:
-            ifname = pick(r, "INTERFACE", "INTF", "NAME")
-            if ifname == interface:
-                target = r
-                break
-
-        if not target:
+        if not rows:
             return {
                 "interface": interface,
-                "error": f"Interface '{interface}' not found in 'show ip interface brief'"
+                "found": False,
+                "raw": raw,
             }
 
-        ip_addr = pick(target, "IP_ADDRESS", "IPADDR", "IP")
-        status = (pick(target, "STATUS", "STATE") or "").strip().lower()
-        proto = (pick(target, "PROTOCOL", "PROTO") or "").strip().lower()
+        r = rows[0]
 
-        # Cisco typicky: "administratively down" => admin down
-        admin_up = status != "administratively down"
-        oper_up = (status == "up" and proto == "up")
+        # názvy polí závisia od šablóny – spravíme robustné "pick"
+        def pick(d, *keys):
+            for k in keys:
+                v = d.get(k)
+                if v not in (None, ""):
+                    return v
+            return None
+
+        link = (pick(r, "LINK_STATUS", "LINK", "STATUS") or "").lower()
+        proto = (pick(r, "PROTOCOL_STATUS", "PROTOCOL") or "").lower()
+        duplex = pick(r, "DUPLEX", "DUPLEX_MODE")
+        speed = pick(r, "SPEED", "BW")
 
         return {
             "interface": interface,
-            "ip_address": ip_addr,
-            "status": status,
+            "found": True,
+            "link": link,
             "protocol": proto,
-            "admin_up": admin_up,
-            "oper_up": oper_up,
+            "duplex": duplex,
+            "speed": speed,
         }
 
     def _parse_mac_textfsm(self, raw_output: str) -> list:

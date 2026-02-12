@@ -665,15 +665,32 @@
                 return;
             }
 
-            if (action === "show-status-int" && Array.isArray(json.counters)) {
-                if (!json.counters.length) return showMessage("Nenájdené žiadne údaje o interface.", "info");
-                const lines = json.counters.map(e =>
-                    `Interface ${e.INTERFACE}:\n` +
-                    `  Link: ${e.LINK_STATUS}, Protocol: ${e.PROTOCOL_STATUS}\n` +
-                    `  Duplex: ${e.DUPLEX}, Speed: ${e.SPEED}`
-                ).join("\n\n");
-                showMessage(lines, "success");
-                return;
+            if (action === "show-status-int") {
+                // nový formát: backend vracia { stav: "...", state: {...} }
+                if (json.state) {
+                    const s = json.state;
+
+                    const lines =
+                        `Interface ${s.interface}:\n` +
+                        `Link: ${s.link ?? s.status ?? "?"}, Protocol: ${s.protocol ?? "?"}\n` +
+                        `Duplex: ${s.duplex ?? "?"}, Speed: ${s.speed ?? "?"}`;
+
+                    showMessage(lines, "success");
+                    return;
+                }
+
+                // fallback (ak by backend ešte vracal staré "counters" pole)
+                if (Array.isArray(json.counters) && json.counters.length) {
+                    const lines = json.counters.map(e =>
+                        `Interface ${e.INTERFACE}:\n` +
+                        `  Link: ${e.LINK_STATUS}, Protocol: ${e.PROTOCOL_STATUS}\n` +
+                        `  Duplex: ${e.DUPLEX}, Speed: ${e.SPEED}`
+                    ).join("\n\n");
+                    showMessage(lines, "success");
+                    return;
+                }
+
+                return showMessage("Nenájdené žiadne údaje o interface.", "info");
             }
 
             if (action === "show-dhcp-bindings" && Array.isArray(json.bindings)) {
