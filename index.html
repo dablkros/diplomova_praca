@@ -257,8 +257,9 @@
     /******************************************************************
      * KONŠTANTY / KONFIG
      ******************************************************************/
-    const API_BASE = "http://localhost:8001"; // Backend (FastAPI/...)
-    const WS_HOST = () => `ws://${location.hostname}:8001`; // WebSocket base
+    const API_BASE = "http://127.0.0.1:8001"; // Backend (FastAPI/...)
+    const HOST = location.hostname || "127.0.0.1";
+    const WS_HOST = () => `ws://${HOST}:8001`;// WebSocket base
 
     /******************************************************************
      * DOM HELPERY
@@ -796,6 +797,7 @@
         await compareAttrs();
     }
 
+    let liveWs = null;
 
     /******************************************************************
      * GRAF ERROR COUNTERS (WebSocket + Chart.js)
@@ -847,7 +849,6 @@
     function startOrStopErrorChart() {
         const btn = $("measureBtn");
 
-
         // Ak WS nebeží -> štart
         if (!ws || ws.readyState !== WebSocket.OPEN) {
             const payload = buildBasePayload();
@@ -859,13 +860,20 @@
             btn.textContent = "Stop meranie";
             showMessage("", "info");
 
-            const url = `${WS_HOST()}/ws/counters`
-                + `?host=${encodeURIComponent(payload.host)}`
-                + `&username=${encodeURIComponent(payload.username)}`
-                + `&password=${encodeURIComponent(payload.password)}`
-                + `&interface=${encodeURIComponent(payload.interface)}`;
+            const params = new URLSearchParams();
+            params.append("host", payload.host);
+            params.append("interface", payload.interface);
 
+            if (payload.username && payload.username !== "undefined") {
+                params.append("username", payload.username);
+            }
+            if (payload.password && payload.password !== "undefined") {
+                params.append("password", payload.password);
+            }
+
+            const url = `${WS_HOST()}/ws/counters?${params.toString()}`;
             ws = new WebSocket(url);
+
 
             ws.onmessage = (ev) => {
                 const msg = JSON.parse(ev.data);
@@ -893,9 +901,8 @@
     /******************************************************************
      * LIVE COUNTERS (WebSocket + text)
      ******************************************************************/
-    let liveWs = null;
-
     function startLiveCounters() {
+        console.log("startLiveCounters clicked");
         const payload = buildBasePayload();
         if (!validateBase(payload)) {
             return showMessage("Vyplň všetky polia vrátane interface.", "error");
@@ -903,11 +910,20 @@
 
         $("liveCounter").style.display = "block";
 
-        const url = `${WS_HOST()}/ws/live-counters`
-            + `?host=${encodeURIComponent(payload.host)}`
-            + `&username=${encodeURIComponent(payload.username)}`
-            + `&password=${encodeURIComponent(payload.password)}`
-            + `&interface=${encodeURIComponent(payload.interface)}`;
+        const params = new URLSearchParams();
+        params.append("host", payload.host);
+        params.append("interface", payload.interface);
+
+        if (payload.username && payload.username !== "undefined") params.append("username", payload.username);
+        if (payload.password && payload.password !== "undefined") params.append("password", payload.password);
+
+        const url = `${WS_HOST()}/ws/live-counters?${params.toString()}`;
+
+        // zavri starý, ak beží
+        if (liveWs && (liveWs.readyState === WebSocket.OPEN || liveWs.readyState === WebSocket.CONNECTING)) {
+            liveWs.close();
+        }
+        console.log("WS url:", url);
 
         liveWs = new WebSocket(url);
 
@@ -917,13 +933,14 @@
             if (msg.error) {
                 showMessage(`Chyba: ${msg.error}`, "error");
             } else {
-                $("liveInput").innerText = msg.input;
-                $("liveOutput").innerText = msg.output;
+                $("liveInput").innerText = msg.input ?? 0;
+                $("liveOutput").innerText = msg.output ?? 0;
             }
         };
         liveWs.onerror = () => showMessage("Chyba Live WS", "error");
         liveWs.onclose = () => showMessage("Live counter zastavený.", "info");
     }
+
 
     function stopLiveCounters() {
         if (liveWs && liveWs.readyState === WebSocket.OPEN) liveWs.close();
