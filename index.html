@@ -123,13 +123,92 @@
 
         /* Diff output */
         #diffOutput {
-            white-space: pre-wrap;
-            background: #111;
-            color: #eee;
-            padding: 1rem;
-            border-radius: 6px;
-            max-height: 350px;
-            overflow: auto;
+            white-space: pre;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.9rem;
+            line-height: 1.35;
+            background: #0f1115;
+            color: #eaeaea;
+            border: 1px solid #23262d;
+        }
+
+        /* Diff summary layout */
+        #diffSummary {
+            display: none;
+            margin: 0.75rem 0;
+            padding: 0.9rem;
+            border-radius: 10px;
+            border: 1px solid #d6d8db;
+            background: #f7f7f8;
+            font-size: 0.95rem;
+            line-height: 1.35;
+        }
+
+        .summary-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            align-items: center;
+            margin-bottom: 0.6rem;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.55rem;
+            border-radius: 999px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            border: 1px solid;
+            white-space: nowrap;
+        }
+
+        .badge-ok {
+            background: #e8f5ee;
+            color: #146c43;
+            border-color: #b7e1c7;
+        }
+
+        .badge-warn {
+            background: #fff3cd;
+            color: #7a5a00;
+            border-color: #ffe29a;
+        }
+
+        .badge-bad {
+            background: #fdecec;
+            color: #b00020;
+            border-color: #f5b5bf;
+        }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.6rem;
+            margin-top: 0.6rem;
+        }
+
+        .kv-card {
+            padding: 0.6rem 0.75rem;
+            border-radius: 10px;
+            background: #fff;
+            border: 1px solid #e6e6e6;
+        }
+
+        .kv-label {
+            font-size: 0.78rem;
+            opacity: 0.75;
+            margin-bottom: 0.1rem;
+        }
+
+        .kv-value {
+            font-weight: 700;
+        }
+
+        .kv-mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.9rem;
         }
     </style>
 
@@ -244,8 +323,7 @@
             <button id="diffApplyMergeBtn">Aplikovať (merge)</button>
             <button id="diffApplyReplaceBtn">Aplikovať (replace)</button>
         </div>
-
-        <div id="diffSummary" class="info" style="padding:0.75rem; border-radius:6px; display:none;"></div>
+        <div id="diffSummary"></div>
         <pre id="diffOutput"></pre>
     </div>
 </div>
@@ -480,12 +558,54 @@
 
 // (tu si potom nastav summary text)
             $("diffSummary").style.display = "block";
-            $("diffSummary").textContent =
-                `Device: ${res.device} Platform: ${res.platform} Interface: ${res.interface} ` +
-                `Status: ${status}  Rozdiely: ${diffCount}`;
 
+            const sotEnabled = res.state?.sot_enabled;
+            const devAdminUp = res.state?.device_admin_up;
+            const devOperUp = res.state?.device_oper_up;
+            const stateSync = res.state?.in_sync;
+
+            const stateDiff =
+                (typeof sotEnabled === "boolean" && typeof devAdminUp === "boolean")
+                    ? (sotEnabled !== devAdminUp ? 1 : 0)
+                    : 0;
+
+            const totalDiff = diffCount + stateDiff;
+
+            const badgeClass = res.in_sync ? "badge-ok" : "badge-bad";
+            const badgeText = res.in_sync ? "IN SYNC" : "OUT OF SYNC";
+
+            $("diffSummary").style.display = "block";
+            $("diffSummary").innerHTML = `
+  <div class="summary-row">
+    <span class="badge ${badgeClass}">${badgeText}</span>
+    <span class="kv-mono">Device: <b>${res.device}</b></span>
+    <span class="kv-mono">Platform: <b>${res.platform}</b></span>
+    <span class="kv-mono">Interface: <b>${res.interface}</b></span>
+  </div>
+
+  <div class="kv-grid">
+    <div class="kv-card">
+      <div class="kv-label">SoT enabled</div>
+      <div class="kv-value">${sotEnabled}</div>
+    </div>
+
+    <div class="kv-card">
+      <div class="kv-label">Device admin_up (shutdown?)</div>
+      <div class="kv-value">${devAdminUp}</div>
+    </div>
+
+    <div class="kv-card">
+      <div class="kv-label">Device oper_up</div>
+      <div class="kv-value">${devOperUp}</div>
+    </div>
+
+    <div class="kv-card">
+      <div class="kv-label">Rozdiely</div>
+      <div class="kv-value">Config: ${diffCount} • State: ${stateDiff} • Spolu: ${totalDiff}</div>
+    </div>
+  </div>
+`;
             openModal("diffModal");
-
 
 // a message box schovaj
             showMessage("", "info");
@@ -953,10 +1073,33 @@
     async function init() {
         try {
             showMessage("Načítavam regióny…", "info");
+
             const regions = await fetchRegions();
             clearSelect("regionSelect");
             fillSelect("regionSelect", regions, "name", "id");
+
+            // 1️⃣ Vyber prvý región (ak existuje)
+            if (regions.length > 0) {
+                $("regionSelect").selectedIndex = 1; // 0 je "-- Vyber --"
+                await onRegionChange();
+            }
+
+            // 2️⃣ Vyber prvý subregión
+            const subSel = $("subregionSelect");
+            if (subSel.options.length > 1) {
+                subSel.selectedIndex = 1;
+                await onSubregionChange();
+            }
+
+            // 3️⃣ Vyber prvý site
+            const siteSel = $("siteSelect");
+            if (siteSel.options.length > 1) {
+                siteSel.selectedIndex = 1;
+                await onSiteChange();
+            }
+
             showMessage("", "info");
+
         } catch (e) {
             showMessage(`Nastala chyba pri init: ${e.message}`, "error");
         }
@@ -983,7 +1126,7 @@
             `Device output:\n${json.output || ""}`;
 
         $("diffSummary").style.display = "block";
-        $("diffSummary").textContent = text;
+        $("diffSummary").innerHTML = `<pre style="margin:0; white-space:pre-wrap;">${escapeHtml(text)}</pre>`;
     }
 
 

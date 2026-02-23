@@ -26,14 +26,23 @@ def compare_interface_config(netbox: NetBoxClient, device_name: str, host: str, 
     )
     try:
         running = client.get_running_interface_block(interface)
-        status = client.get_interface_status_textfsm(interface)
+        status = client.get_interface_state(interface)
     finally:
         client.close()
 
     sot_enabled = bool(sot["iface"].get("enabled", True))
-    dev_admin_up = status.get("admin_up") if isinstance(status, dict) else None
-    dev_oper_up = status.get("oper_up") if isinstance(status, dict) else None
-    state_in_sync = (dev_admin_up is None) or (sot_enabled == dev_admin_up)
+    if isinstance(status, dict) and status.get("found"):
+        link = (status.get("link") or "").lower().strip()
+        proto = (status.get("protocol") or "").lower().strip()
+
+        dev_admin_up = link != "administratively down"
+        dev_oper_up = proto.startswith("up")
+
+        state_in_sync = (sot_enabled == dev_admin_up)
+    else:
+        dev_admin_up = None
+        dev_oper_up = None
+        state_in_sync = True
 
     intended_n = normalize_lines(intended, mode="managed")
     running_n = normalize_lines(running, mode="managed")
