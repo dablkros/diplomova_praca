@@ -1,0 +1,29 @@
+Value INTERFACE (\S+)
+Value TEMPERATURE (-?\d+(?:\.\d+)?)
+Value VOLTAGE (-?\d+(?:\.\d+)?)
+Value TX_POWER (-?\d+(?:\.\d+)?)
+Value RX_POWER (-?\d+(?:\.\d+)?)
+Value TX_BIAS (-?\d+(?:\.\d+)?)
+
+Start
+  ^\s*${INTERFACE}\s*$$ -> Continue
+  ^\s*Temperature\s+(-?\d+(?:\.\d+)?)\s+C -> Temp
+  ^\s*Voltage\s+(-?\d+(?:\.\d+)?)\s+V -> Volt
+  ^\s*Tx\s+Power\s+(-?\d+(?:\.\d+)?)\s+dBm -> TxPower
+  ^\s*Rx\s+Power\s+(-?\d+(?:\.\d+)?)\s+dBm -> RxPower
+  ^\s*Tx\s+Bias\s+(-?\d+(?:\.\d+)?)\s+mA -> TxBias
+
+Temp
+  ^\s*Temperature\s+${TEMPERATURE}\s+C -> Start
+
+Volt
+  ^\s*Voltage\s+${VOLTAGE}\s+V -> Start
+
+TxPower
+  ^\s*Tx\s+Power\s+${TX_POWER}\s+dBm -> Start
+
+RxPower
+  ^\s*Rx\s+Power\s+${RX_POWER}\s+dBm -> Start
+
+TxBias
+  ^\s*Tx\s+Bias\s+${TX_BIAS}\s+mA -> Record Start

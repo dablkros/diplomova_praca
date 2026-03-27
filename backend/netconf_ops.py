@@ -465,6 +465,100 @@ class DeviceClient:
         prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
         return f"{ip}/{prefix}"
 
+    def show_optics(self, interface: str) -> dict:
+        """
+        Získa optické DOM údaje pre konkrétny interface a vyparsuje ich cez TextFSM.
+        Predpoklad: interface je podľa SoT optický port.
+        """
+        self._ensure_ssh()
+
+        commands = [
+            f"show interfaces {interface} transceiver detail",
+            f"show interfaces transceiver detail | section {interface}",
+        ]
+
+        raw_output = None
+        used_command = None
+
+        for cmd in commands:
+            try:
+                output = self.conn.send_command(cmd, read_timeout=30)
+                if output and "% Invalid input" not in output and "% Incomplete command" not in output:
+                    raw_output = output
+                    used_command = cmd
+                    break
+            except Exception:
+                continue
+
+        if not raw_output:
+            return {
+                "interface": interface,
+                "found": False,
+                "command_used": None,
+                "message": "Nepodarilo sa získať optické údaje zo zariadenia.",
+                "raw": ""
+            }
+
+        parsed = self._parse_optics_textfsm(raw_output)
+
+        if not parsed:
+            return {
+                "interface": interface,
+                "found": False,
+                "command_used": used_command,
+                "message": "Výstup sa nepodarilo vyparsovať cez TextFSM.",
+                "raw": raw_output
+            }
+
+        row = parsed[0]
+
+        return {
+            "interface": row.get("INTERFACE", interface),
+            "temperature": self._safe_float(row.get("TEMPERATURE")),
+            "voltage": self._safe_float(row.get("VOLTAGE")),
+            "tx_power": self._safe_float(row.get("TX_POWER")),
+            "rx_power": self._safe_float(row.get("RX_POWER")),
+            "tx_bias": self._safe_float(row.get("TX_BIAS")),
+            "found": True,
+            "command_used": used_command,
+            "raw": raw_output
+        }
+
+    def _parse_optics_textfsm(self, raw_output: str) -> list[dict]:
+        """
+        Parsing show interfaces ... transceiver detail cez TextFSM šablónu.
+        """
+        template_path = os.path.join(
+            os.path.dirname(__file__),
+            "templates",
+            "cisco_ios_show_interfaces_transceiver_detail.textfsm"
+        )
+
+        if not os.path.exists(template_path):
+            return []
+
+        with open(template_path, "r", encoding="utf-8") as f:
+            fsm = textfsm.TextFSM(f)
+
+        parsed_rows = fsm.ParseText(raw_output)
+        headers = fsm.header
+
+        results = []
+        for row in parsed_rows:
+            results.append(dict(zip(headers, row)))
+        return results
+
+    def _safe_float(self, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        if value == "":
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
 
 
 class PortCompareRequest(BaseModel):

@@ -1,9 +1,9 @@
-<config>
+<config xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0">
   <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
     <interface>
       <{{ iface_type }}>
         <name>{{ iface_name }}</name>
-        <shutdown{% if operation %} operation="{{ operation }}"{% endif %}/>
+        <shutdown{% if operation %} nc:operation="{{ operation }}"{% endif %}/>
       </{{ iface_type }}>
     </interface>
   </native>
