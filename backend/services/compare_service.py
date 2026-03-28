@@ -2,33 +2,43 @@ from __future__ import annotations
 
 from backend.clients.netbox_client import NetBoxClient
 from backend.core.platforms import get_drivers_for_device
-from backend.services.device_service import resolve_creds, make_device_client
+from backend.services.device_service import make_driver_from_identity
 from backend.services.interface_intent import nb_to_intended_lines, normalize_lines, unified_diff
+
 
 def nb_get_interface_detail(netbox: NetBoxClient, device_name: str, interface_name: str) -> dict:
     iface = netbox.get_interface_by_device_and_name(device_name, interface_name)
     ips = netbox.get_interface_ips(iface["id"])
     return {"iface": iface, "ips": ips}
 
-def compare_interface_config(netbox: NetBoxClient, device_name: str, host: str, interface: str, username: str | None, password: str | None) -> dict:
-    user, pwd = resolve_creds(username, password)
 
-    drivers = get_drivers_for_device(netbox, device_name)
+def compare_interface_config(
+    netbox: NetBoxClient,
+    device_name: str,
+    host: str,
+    interface: str,
+    username: str | None,
+    password: str | None,
+) -> dict:
+    driver, resolved_host, resolved_device_name = make_driver_from_identity(
+        netbox,
+        device_name=device_name,
+        host=host,
+        username=username,
+        password=password,
+    )
+
+    drivers = get_drivers_for_device(netbox, resolved_device_name)
     platform = drivers["platform"]
 
-    sot = nb_get_interface_detail(netbox, device_name, interface)
+    sot = nb_get_interface_detail(netbox, resolved_device_name, interface)
     intended = nb_to_intended_lines(platform, sot["iface"], sot["ips"], include_admin=False)
 
-    client = make_device_client(
-        host, user, pwd,
-        netconf_name=drivers["netconf_device_name"],
-        netmiko_type=drivers["netmiko_device_type"],
-    )
     try:
-        running = client.get_running_interface_block(interface)
-        status = client.get_interface_state(interface)
+        running = driver.get_running_interface_block(interface)
+        status = driver.get_interface_state(interface)
     finally:
-        client.close()
+        driver.close()
 
     sot_enabled = bool(sot["iface"].get("enabled", True))
     if isinstance(status, dict) and status.get("found"):
@@ -49,7 +59,8 @@ def compare_interface_config(netbox: NetBoxClient, device_name: str, host: str, 
     diff = unified_diff(running_n, intended_n)
 
     return {
-        "device": device_name,
+        "device": resolved_device_name,
+        "host": resolved_host,
         "platform": platform,
         "interface": interface,
         "state": {
@@ -68,33 +79,46 @@ def compare_interface_config(netbox: NetBoxClient, device_name: str, host: str, 
         "in_sync": (running_n == intended_n) and state_in_sync,
     }
 
-def apply_interface_merge(netbox: NetBoxClient, device_name: str, host: str, interface: str, username: str | None, password: str | None) -> dict:
-    user, pwd = resolve_creds(username, password)
-    drivers = get_drivers_for_device(netbox, device_name)
+
+def apply_interface_merge(
+    netbox: NetBoxClient,
+    device_name: str,
+    host: str,
+    interface: str,
+    username: str | None,
+    password: str | None,
+) -> dict:
+    driver, resolved_host, resolved_device_name = make_driver_from_identity(
+        netbox,
+        device_name=device_name,
+        host=host,
+        username=username,
+        password=password,
+    )
+
+    drivers = get_drivers_for_device(netbox, resolved_device_name)
     platform = drivers["platform"]
 
-    sot = nb_get_interface_detail(netbox, device_name, interface)
+    sot = nb_get_interface_detail(netbox, resolved_device_name, interface)
     intended = nb_to_intended_lines(platform, sot["iface"], sot["ips"])
 
-    client = make_device_client(
-        host, user, pwd,
-        netconf_name=drivers["netconf_device_name"],
-        netmiko_type=drivers["netmiko_device_type"],
-    )
     try:
         cmds = [f"interface {interface}"]
         for line in intended:
             if line.lower().startswith("ip address "):
                 cmds.append("no ip address")
             cmds.append(line)
-        output = client.send_config_lines(cmds)
+
+        output = driver.send_config_lines(cmds)
+
         return {
             "status": "APPLIED_MERGE",
-            "device": device_name,
+            "device": resolved_device_name,
+            "host": resolved_host,
             "platform": platform,
             "interface": interface,
             "commands": cmds,
             "output": output,
         }
     finally:
-        client.close()
+        driver.close()
