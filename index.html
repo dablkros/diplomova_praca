@@ -262,6 +262,8 @@
      OVLÁDACIE TLAČIDLÁ
      ======================= -->
 <div class="button-grid">
+    <button data-action="netconf/enable">Povoliť NETCONF</button>
+    <button data-action="netconf/check">Overiť NETCONF</button>
     <button data-action="shutdown">Vypnúť interface</button>
     <button data-action="no-shutdown">Zapnúť interface</button>
     <button data-action="restart-interface">Reštartovať interface</button>
@@ -823,9 +825,29 @@
                 showMessage(lines, "success");
                 return;
             }
+            if (action === "netconf/check") {
+                const lines = [
+                    `NETCONF-YANG: ${json.netconf_yang_present ? "Áno ✅" : "Nie ❌"}`,
+                    `NETCONF SSH: ${json.netconf_ssh_present ? "Áno ✅" : "Nie ❌"}`,
+                    `Session dostupná: ${json.netconf_session_available ? "Áno ✅" : "Nie ❌"}`,
+                    json.message ? `Správa: ${json.message}` : ""
+                ].filter(Boolean).join("\n");
 
+                showMessage(lines, json.all_required_present || json.configured ? "success" : "info");
+                return;
+            }
+
+            if (action === "netconf/enable") {
+                const lines = [
+                    json.message || "NETCONF operácia prebehla.",
+                    `NETCONF session dostupná: ${json.netconf_session_available ? "Áno ✅" : "Nie ❌"}`
+                ].join("\n");
+
+                showMessage(lines, json.ok ? "success" : "info");
+                return;
+            }
             // default
-            showMessage(`Úspech: ${json.stav || "Operácia prebehla úspešne."}`, "success");
+            showMessage(`Úspech: ${json.message || json.stav || "Operácia prebehla úspešne."}`, "success");
         } catch (e) {
             showMessage(`Chyba: ${e.message}`, "error");
         }

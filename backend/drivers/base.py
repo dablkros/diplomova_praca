@@ -71,5 +71,13 @@ class BaseDeviceDriver(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def enable_netconf(self) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def check_netconf_enabled(self) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
     def close(self) -> None:
         raise NotImplementedError

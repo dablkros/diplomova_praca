@@ -527,6 +527,67 @@ class CiscoIosxeDriver(BaseDeviceDriver):
         commands = [line.strip() for line in lines if line and line.strip()]
         return conn.send_config_set(commands)
 
+    def enable_netconf(self) -> dict:
+        conn = self._ensure_ssh()
+
+        commands = [
+            "netconf-yang",
+            "netconf ssh",
+        ]
+
+        output = conn.send_config_set(commands, cmd_verify=False)
+
+        time.sleep(2)
+
+        if self.netconf:
+            try:
+                self.netconf.close_session()
+            except Exception:
+                pass
+
+        self.netconf = None
+        self._try_connect_netconf()
+
+        verify_output = conn.send_command("show running-config | include ^netconf-yang")
+        enabled = "netconf-yang" in verify_output
+
+        return {
+            "ok": enabled,
+            "operation": "enable-netconf",
+            "configured": enabled,
+            "netconf_session_available": self.netconf is not None,
+            "command_output": output,
+            "verify_output": verify_output,
+            "message": "NETCONF bol povolený." if enabled else "NETCONF sa nepodarilo potvrdiť v running-config."
+        }
+
+    def check_netconf_enabled(self) -> dict:
+        conn = self._ensure_ssh()
+
+        output = conn.send_command(
+            "show running-config | include ^netconf-yang|^netconf ssh"
+        )
+
+        has_netconf_yang = "netconf-yang" in output
+        has_netconf_ssh = "netconf ssh" in output
+
+        if has_netconf_yang and not self.netconf:
+            self._try_connect_netconf()
+
+        return {
+            "ok": has_netconf_yang,
+            "operation": "check-netconf",
+            "netconf_yang_present": has_netconf_yang,
+            "netconf_ssh_present": has_netconf_ssh,
+            "netconf_session_available": self.netconf is not None,
+            "verify_output": output,
+            "message": (
+                "NETCONF-YANG je povolený."
+                if has_netconf_yang
+                else "NETCONF-YANG nie je povolený."
+            ),
+        }
+
     def close(self) -> None:
         if self.netconf:
             try:

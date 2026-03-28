@@ -251,6 +251,40 @@ def clear_mac_table(data: ClearMacTableRequest):
     finally:
         driver.close()
 
+@router.post("/netconf/enable")
+def enable_netconf(data: DeviceInfo):
+    driver = _make_driver_for_device(data)
+    try:
+        require_capability(
+            driver,
+            "supports_netconf",
+            "Toto zariadenie nepodporuje NETCONF.",
+        )
+        return driver.enable_netconf()
+    except CapabilityNotSupportedError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        driver.close()
+
+
+@router.post("/netconf/check")
+def check_netconf(data: DeviceInfo):
+    driver = _make_driver_for_device(data)
+    try:
+        require_capability(
+            driver,
+            "supports_netconf",
+            "Toto zariadenie nepodporuje NETCONF.",
+        )
+        return driver.check_netconf_enabled()
+    except CapabilityNotSupportedError as e:
+        raise HTTPException(status_code=400, detail=e.message)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        driver.close()
 
 @router.post("/device-capabilities")
 def device_capabilities(data: DeviceInfo):
