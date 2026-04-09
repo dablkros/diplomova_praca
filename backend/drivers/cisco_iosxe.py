@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 import re
 import time
 import ipaddress
-import requests
 import textfsm
 import xml.etree.ElementTree as ET
 
@@ -16,6 +14,7 @@ from netmiko import ConnectHandler
 
 from backend.drivers.base import BaseDeviceDriver
 from backend.drivers.capabilities import DeviceCapabilities
+from backend.utils.mac_vendor import lookup_mac_vendor
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -30,35 +29,6 @@ def get_template_path(name: str) -> str:
 def render_template(template_name: str, **kwargs) -> str:
     template = env.get_template(template_name)
     return template.render(**kwargs)
-
-
-def get_macvendors_token() -> str | None:
-    return os.getenv("MACVENDORS_TOKEN")
-
-
-def get_mac_vendor(mac_address: str) -> str:
-    url = f"https://api.macvendors.com/v1/lookup/{mac_address}"
-    token = get_macvendors_token()
-    if not token:
-        return "Token missing"
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("data", {}).get("organization_name", "Not Found")
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            return "Not Found"
-        return "Error"
-    except Exception:
-        return "Error"
-
 
 def get_interface_type_and_name(interface: str):
     interface = interface.strip().replace(" ", "")
@@ -240,7 +210,7 @@ class CiscoIosxeDriver(BaseDeviceDriver):
 
         for entry in results:
             mac = entry.get("DESTINATION_ADDRESS") or entry.get("MAC_ADDRESS")
-            entry["VENDOR"] = get_mac_vendor(mac)
+            entry["VENDOR"] = lookup_mac_vendor(mac)
 
         return results
 

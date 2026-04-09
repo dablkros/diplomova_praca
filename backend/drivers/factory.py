@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from backend.drivers.base import BaseDeviceDriver
 from backend.drivers.cisco_iosxe import CiscoIosxeDriver
+from backend.drivers.mikrotikrest import MikroTikRestDriver
+
 
 def create_driver(
     *,
@@ -9,8 +11,8 @@ def create_driver(
     host: str,
     username: str,
     password: str,
-    netconf_name: str,
-    netmiko_type: str,
+    netconf_name: str | None = None,
+    netmiko_type: str | None = None,
 ) -> BaseDeviceDriver:
     slug = (platform or "").strip().lower()
 
@@ -19,8 +21,15 @@ def create_driver(
             host=host,
             username=username,
             password=password,
-            netconf_name=netconf_name,
-            netmiko_type=netmiko_type,
+            netconf_name=netconf_name or "iosxe",
+            netmiko_type=netmiko_type or "cisco_ios",
         )
 
-    return ValueError("Driver not implemented")
+    if slug == "mikrotik-routeros":
+        return MikroTikRestDriver(
+            host=host,
+            username=username,
+            password=password,
+        )
+
+    raise ValueError(f"Driver not implemented for platform '{slug}'")

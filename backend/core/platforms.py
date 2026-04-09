@@ -9,6 +9,7 @@ PLATFORM_MAP = {
     "nxos":   {"netmiko": "cisco_nxos", "netconf": "nxos"},
     "junos":  {"netmiko": "juniper_junos", "netconf": "junos"},
     "eos":    {"netmiko": "arista_eos", "netconf": "eos"},
+    "mikrotik-routeros": {"netmiko": None, "netconf": None},
 }
 
 def get_drivers_for_device(netbox: NetBoxClient, device_name: str) -> dict:
@@ -18,12 +19,14 @@ def get_drivers_for_device(netbox: NetBoxClient, device_name: str) -> dict:
             status_code=400,
             detail=f"Device '{device_name}' nemá v NetBoxe nastavenú platformu (SoT)."
         )
+
     mapping = PLATFORM_MAP.get(slug)
     if not mapping:
         raise HTTPException(
             status_code=400,
             detail=f"Platform '{slug}' nie je namapovaná v PLATFORM_MAP."
         )
+
     return {
         "platform": slug,
         "netmiko_device_type": mapping["netmiko"],
