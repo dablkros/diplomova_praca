@@ -1,0 +1,14 @@
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
+    <interface>
+      <{{ iface_type }}>
+        <name>{{ iface_name }}</name>
+        {% if operation == "remove" %}
+        <shutdown xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" nc:operation="remove"/>
+        {% else %}
+        <shutdown/>
+        {% endif %}
+      </{{ iface_type }}>
+    </interface>
+  </native>
+</config>

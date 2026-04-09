@@ -62,7 +62,7 @@ def get_mac_vendor(mac_address: str) -> str:
 
 def get_interface_type_and_name(interface: str):
     interface = interface.strip().replace(" ", "")
-    match = re.match(r"([a-zA-Z]+)([\d\/\.]+)", interface)
+    match = re.match(r"([a-zA-Z-]+)([\d\/\.]+)", interface)
     if not match:
         raise ValueError(f'"{interface}" is not a valid value.')
 
@@ -73,6 +73,14 @@ def get_interface_type_and_name(interface: str):
         "gigabitethernet": "GigabitEthernet",
         "fastethernet": "FastEthernet",
         "tengigabitethernet": "TenGigabitEthernet",
+        "twogigabitethernet": "TwoGigabitEthernet",
+        "fivegigabitethernet": "FiveGigabitEthernet",
+        "twentyfivegige": "TwentyFiveGigE",
+        "fortygigabitethernet": "FortyGigabitEthernet",
+        "hundredgige": "HundredGigE",
+        "port-channel": "Port-channel",
+        "loopback": "Loopback",
+        "tunnel": "Tunnel",
         "vlan": "Vlan",
     }
 
@@ -82,16 +90,61 @@ def get_interface_type_and_name(interface: str):
     return type_map[raw_type], iface_name
 
 
+NS = {
+    "ifo": "http://cisco.com/ns/yang/Cisco-IOS-XE-interfaces-oper",
+}
+
+SPEED_MAP = {
+    "speed-10mb": "10Mb/s",
+    "speed-100mb": "100Mb/s",
+    "speed-1gb": "1000Mb/s",
+    "speed-2500mb": "2500Mb/s",
+    "speed-5gb": "5000Mb/s",
+    "speed-10gb": "10Gb/s",
+    "speed-25gb": "25Gb/s",
+    "speed-40gb": "40Gb/s",
+    "speed-50gb": "50Gb/s",
+    "speed-100gb": "100Gb/s",
+    "speed-400gb": "400Gb/s",
+    "speed-auto": "auto",
+    "speed-unknown": "",
+}
+
+DUPLEX_MAP = {
+    "full-duplex": "full",
+    "half-duplex": "half",
+    "auto-duplex": "auto",
+    "unknown-duplex": "",
+}
+
+
+def _get_text(root, xpath: str):
+    node = root.find(xpath, namespaces=NS)
+    if node is None or node.text is None:
+        return None
+    return node.text.strip()
+
+
+def _bps_to_human(speed_bps: int) -> str:
+    if speed_bps >= 1_000_000_000:
+        return f"{speed_bps // 1_000_000_000}Gb/s"
+    if speed_bps >= 1_000_000:
+        return f"{speed_bps // 1_000_000}Mb/s"
+    if speed_bps >= 1_000:
+        return f"{speed_bps // 1_000}Kb/s"
+    return f"{speed_bps}b/s"
+
+
 class CiscoIosxeDriver(BaseDeviceDriver):
     def __init__(
-        self,
-        host: str,
-        username: str,
-        password: str,
-        *,
-        netconf_name: str = "iosxe",
-        netmiko_type: str = "cisco_ios",
-        port: int = 830,
+            self,
+            host: str,
+            username: str,
+            password: str,
+            *,
+            netconf_name: str = "iosxe",
+            netmiko_type: str = "cisco_ios",
+            port: int = 830,
     ) -> None:
         self.host = host
         self.username = username
@@ -226,49 +279,129 @@ class CiscoIosxeDriver(BaseDeviceDriver):
         output = conn.send_command(f"show mac address-table interface {interface}")
         return self._parse_mac_textfsm(output)
 
+    def _find_text(self, parent, path: str, ns: dict, default: str = "") -> str:
+        node = parent.find(path, ns)
+        return (node.text or "").strip() if node is not None and node.text else default
+
     def get_interface_state(self, interface: str) -> dict:
-        conn = self._ensure_ssh()
-        raw = conn.send_command(f"show interface {interface}")
+        self._require_netconf()
 
-        template_path = get_template_path("cisco_ios_show_interfaces.textfsm")
-        with open(template_path) as tpl:
-            fsm = textfsm.TextFSM(tpl)
-            parsed = fsm.ParseText(raw)
+        filter_xml = f"""
+        <filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+          <oper-data-format-text-block>
+            <exec>show interfaces {interface}</exec>
+          </oper-data-format-text-block>
+        </filter>
+        """
 
-        rows = [dict(zip(fsm.header, row)) for row in parsed]
+        reply = self.netconf.get(filter=filter_xml)
+        raw_xml = reply.xml
+        root = ET.fromstring(raw_xml)
 
-        if not rows:
+        response_text = ""
+        for elem in root.iter():
+            if elem.tag.endswith("response") and elem.text:
+                response_text = elem.text.strip()
+                break
+
+        if not response_text:
             return {
                 "interface": interface,
                 "found": False,
-                "raw": raw,
+                "port_up": False,
+                "link": "down",
+                "protocol": "down",
+                "admin_status": "",
+                "oper_status": "",
+                "duplex": "",
+                "speed": "",
+                "raw_xml": raw_xml,
             }
 
-        row = rows[0]
-        link = (self._pick(row, "LINK_STATUS", "LINK", "STATUS") or "").lower()
-        protocol = (self._pick(row, "PROTOCOL_STATUS", "PROTOCOL") or "").lower()
-        duplex = self._pick(row, "DUPLEX", "DUPLEX_MODE")
-        speed = self._pick(row, "SPEED", "BW")
+        first_line = ""
+        duplex = ""
+        speed = ""
+
+        for line in response_text.splitlines():
+            s = line.strip()
+
+            if not first_line and " is " in s and "line protocol is" in s:
+                first_line = s
+
+            if "duplex" in s.lower() and "mb/s" in s.lower():
+                parts = [p.strip() for p in s.split(",")]
+                if len(parts) >= 2:
+                    duplex = parts[0].lower().replace("-duplex", "")
+                    speed = parts[1]
+                break
+
+        oper_up = " is up, line protocol is up" in first_line.lower()
 
         return {
             "interface": interface,
             "found": True,
-            "link": link,
-            "protocol": protocol,
+            "port_up": oper_up,
+            "link": "up" if oper_up else "down",
+            "protocol": "up" if oper_up else "down",
+            "admin_status": "UP" if oper_up else "",
+            "oper_status": "UP" if oper_up else "DOWN" if first_line else "",
             "duplex": duplex,
             "speed": speed,
+            "raw_xml": raw_xml,
         }
 
     def get_interface_counters(self, interface: str) -> list[dict]:
-        conn = self._ensure_ssh()
-        output = conn.send_command(f"show interfaces {interface}")
+        self._require_netconf()
 
-        template_path = get_template_path("cisco_ios_show_interfaces.textfsm")
-        with open(template_path) as tpl:
-            fsm = textfsm.TextFSM(tpl)
-            parsed = fsm.ParseText(output)
+        ns = {
+            "ocif": "http://openconfig.net/yang/interfaces",
+        }
 
-        return [dict(zip(fsm.header, row)) for row in parsed]
+        filter_xml = render_template(
+            "cisco/openconfig_interface_counters.xml.j2",
+            interface=interface,
+        )
+
+        reply = self.netconf.get(("subtree", filter_xml))
+        raw_xml = reply.data_xml
+        root = ET.fromstring(raw_xml)
+
+        iface_node = None
+        for node in root.findall(".//ocif:interface", ns):
+            name = (
+                    self._find_text(node, "ocif:name", ns)
+                    or self._find_text(node, "ocif:state/ocif:name", ns)
+            )
+            if name == interface:
+                iface_node = node
+                break
+
+        if iface_node is None:
+            return []
+
+        counters = iface_node.find("ocif:state/ocif:counters", ns)
+        if counters is None:
+            return []
+
+        return [{
+            "INTERFACE": interface,
+            "INPUT_OCTETS": self._find_text(counters, "ocif:in-octets", ns),
+            "INPUT_UNICAST_PKTS": self._find_text(counters, "ocif:in-unicast-pkts", ns),
+            "INPUT_BROADCAST_PKTS": self._find_text(counters, "ocif:in-broadcast-pkts", ns),
+            "INPUT_MULTICAST_PKTS": self._find_text(counters, "ocif:in-multicast-pkts", ns),
+            "INPUT_DISCARDS": self._find_text(counters, "ocif:in-discards", ns),
+            "INPUT_ERRORS": self._find_text(counters, "ocif:in-errors", ns),
+            "INPUT_UNKNOWN_PROTOS": self._find_text(counters, "ocif:in-unknown-protos", ns),
+            "OUTPUT_OCTETS": self._find_text(counters, "ocif:out-octets", ns),
+            "OUTPUT_UNICAST_PKTS": self._find_text(counters, "ocif:out-unicast-pkts", ns),
+            "OUTPUT_BROADCAST_PKTS": self._find_text(counters, "ocif:out-broadcast-pkts", ns),
+            "OUTPUT_MULTICAST_PKTS": self._find_text(counters, "ocif:out-multicast-pkts", ns),
+            "OUTPUT_DISCARDS": self._find_text(counters, "ocif:out-discards", ns),
+            "OUTPUT_ERRORS": self._find_text(counters, "ocif:out-errors", ns),
+            "LAST_CLEAR": self._find_text(counters, "ocif:last-clear", ns),
+            "RAW_XML": raw_xml,
+        }]
+
 
     def get_mac_table(self, interface: str) -> list[dict]:
         entries = []
@@ -300,78 +433,76 @@ class CiscoIosxeDriver(BaseDeviceDriver):
         return [dict(zip(fsm.header, row)) for row in parsed]
 
     def clear_interface_counters(self, interface: str) -> dict:
-        conn = self._ensure_ssh()
-        cmd = f"clear counters {interface}"
+        self._require_netconf()
 
-        output = conn.send_command_timing(cmd)
-        time.sleep(0.5)
-        confirm_output = conn.send_command_timing("\n")
-        output += confirm_output
+        rpc = render_template(
+            "cisco/cisco_clear_interface_counters.xml.j2",
+            interface=interface,
+        )
+
+        reply = self.netconf.dispatch(to_ele(rpc))
+        result = self._serialize_reply(reply)
 
         return {
             "ok": True,
             "operation": "clear-counters",
             "interface": interface,
-            "result": output,
+            "result": result,
         }
 
-    def shutdown_interface(self, interface: str) -> dict:
+    def _edit_interface_admin_state(self, interface: str, *, operation: str | None = None) -> str:
         self._require_netconf()
 
         iface_type, iface_name = get_interface_type_and_name(interface)
         xml = render_template(
-            "shutdown.xml.j2",
+            "cisco/cisco_interface_admin_state.xml.j2",
             iface_type=iface_type,
             iface_name=iface_name,
+            operation=operation,
         )
         reply = self.netconf.edit_config(target="running", config=xml)
+        return self._serialize_reply(reply)
+
+    def shutdown_interface(self, interface: str) -> dict:
+        result = self._edit_interface_admin_state(interface)
 
         return {
             "ok": True,
             "operation": "shutdown",
             "interface": interface,
-            "result": self._serialize_reply(reply),
+            "result": result,
         }
 
     def no_shutdown_interface(self, interface: str) -> dict:
-        self._require_netconf()
-
-        iface_type, iface_name = get_interface_type_and_name(interface)
-        xml = render_template(
-            "shutdown.xml.j2",
-            iface_type=iface_type,
-            iface_name=iface_name,
-            operation="remove",
-        )
-        reply = self.netconf.edit_config(target="running", config=xml)
+        result = self._edit_interface_admin_state(interface, operation="remove")
 
         return {
             "ok": True,
             "operation": "no-shutdown",
             "interface": interface,
-            "result": self._serialize_reply(reply),
+            "result": result,
         }
 
     def restart_interface(self, interface: str) -> dict:
-        first = self.shutdown_interface(interface)
-        time.sleep(5)
-        second = self.no_shutdown_interface(interface)
+        first = self._edit_interface_admin_state(interface)
+        time.sleep(2)
+        second = self._edit_interface_admin_state(interface, operation="remove")
 
         return {
             "ok": True,
             "operation": "restart",
             "interface": interface,
-            "shutdown_result": first["result"],
-            "no_shutdown_result": second["result"],
+            "shutdown_result": first,
+            "no_shutdown_result": second,
         }
 
     def clear_mac_table(
-        self,
-        *,
-        platform: str,
-        interface: str | None = None,
-        vlan: int | None = None,
-        dynamic_only: bool = True,
+            self,
+            *,
+            platform: str,
+            interface: str | None = None,
+            vlan: int | None = None,
+            dynamic_only: bool = True,
     ) -> dict:
         scopes = sum([1 if interface else 0, 1 if vlan is not None else 0])
         if scopes > 1:
