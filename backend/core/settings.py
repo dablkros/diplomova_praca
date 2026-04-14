@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parents[1]  # .../backend
-# Load .env from project root (next to original main.py) if present
-# You can change this to wherever your .env lives.
+BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR.parent / ".env")
 
 NETBOX_URL: str = os.getenv("NETBOX_URL", "http://localhost:8000")
