@@ -3,7 +3,6 @@ from __future__ import annotations
 import difflib
 import ipaddress
 import re
-from fastapi import HTTPException
 
 def cidr_to_ip_mask(cidr: str) -> tuple[str, str]:
     iface = ipaddress.ip_interface(cidr)
