@@ -1,40 +1,55 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
 import requests
+from fastapi import APIRouter, HTTPException, Query
 
 from backend.clients.netbox_client import NetBoxClient
 
 router = APIRouter(tags=["inventory"])
 netbox = NetBoxClient()
 
+
+def _primary_ip(device: dict) -> str:
+    ip_data = device.get("primary_ip4") or {}
+    return ip_data.get("address", "").split("/")[0] if ip_data else ""
+
+
+def _device_summary(device: dict) -> dict:
+    manufacturer = None
+    if device.get("device_type") and device["device_type"].get("manufacturer"):
+        manufacturer = device["device_type"]["manufacturer"].get("name")
+
+    platform = None
+    if device.get("platform"):
+        platform = device["platform"].get("slug") or device["platform"].get("name")
+
+    model = device.get("device_type", {}).get("model") if device.get("device_type") else None
+
+    return {
+        "name": device["name"],
+        "ip": _primary_ip(device),
+        "manufacturer": manufacturer,
+        "platform": platform,
+        "model": model,
+    }
+
+
+def _compact_device_with_site(device: dict) -> dict:
+    site_name = device["site"]["name"] if device.get("site") else None
+    return {
+        "name": device["name"],
+        "ip": _primary_ip(device),
+        "site": site_name,
+    }
+
+
 @router.get("/devices")
 def get_devices():
     try:
-        data = netbox.list_devices(limit=100)
-        result = []
-        for device in data:
-            ip = device.get("primary_ip4") or {}
-            ip_addr = ip.get("address", "").split("/")[0] if ip else ""
-            manufacturer = None
-            if device.get("device_type") and device["device_type"].get("manufacturer"):
-                manufacturer = device["device_type"]["manufacturer"].get("name")
-            platform = None
-            if device.get("platform"):
-                platform = device["platform"].get("slug") or device["platform"].get("name")
-            model = None
-            if device.get("device_type"):
-                model = device["device_type"].get("model")
-            result.append({
-                "name": device["name"],
-                "ip": ip_addr,
-                "manufacturer": manufacturer,
-                "platform": platform,
-                "model": model,
-            })
-        return result
+        return [_device_summary(device) for device in netbox.list_devices(limit=100)]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/interfaces")
 def get_interfaces(device_name: str = Query(..., description="Názov zariadenia")):
@@ -55,6 +70,7 @@ def get_interfaces(device_name: str = Query(..., description="Názov zariadenia"
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/users")
 def get_users():
     try:
@@ -63,13 +79,15 @@ def get_users():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/regions")
 def get_regions():
     try:
         data = netbox.list_regions(limit=100)
-        return [r for r in data if r.get("parent") is None]
+        return [region for region in data if region.get("parent") is None]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/regions/{region_id}/subregions")
 def get_subregions(region_id: int):
@@ -78,6 +96,7 @@ def get_subregions(region_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/sites")
 def get_sites(region_id: int | None = None):
     try:
@@ -85,30 +104,20 @@ def get_sites(region_id: int | None = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/devices/filter")
 def get_devices_filtered(site_id: int | None = None):
     try:
         data = netbox.list_devices_filtered(site_id=site_id, limit=100)
-        devices_out = []
-        for d in data:
-            ip = d.get("primary_ip4") or {}
-            ip_addr = ip.get("address", "").split("/")[0] if ip else ""
-            site_name = d["site"]["name"] if d.get("site") else None
-            devices_out.append({"name": d["name"], "ip": ip_addr, "site": site_name})
-        return devices_out
+        return [_compact_device_with_site(device) for device in data]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/devices/by-region")
 def get_devices_by_region(region_id: int):
     try:
         devices = netbox.list_devices_by_region(region_id=region_id, limit=100)
-        output = []
-        for d in devices:
-            ip = d.get("primary_ip4") or {}
-            ip_addr = ip.get("address", "").split("/")[0] if ip else ""
-            site_name = d["site"]["name"] if d.get("site") else None
-            output.append({"name": d["name"], "ip": ip_addr, "site": site_name})
-        return output
+        return [_compact_device_with_site(device) for device in devices]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

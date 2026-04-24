@@ -243,7 +243,6 @@ class MikroTikRestDriver(BaseDeviceDriver):
             if not mac:
                 continue
 
-            # odfiltruj lokálne bridge/router záznamy
             if self._is_bool_true(entry.get("local")):
                 continue
 
